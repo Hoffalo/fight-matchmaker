@@ -1,0 +1,25 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Local data / logs / models
+logs/
+data/*.db
+data/*.sqlite
+*.pt
+*.pkl
+*.joblib
+
+# Scraped artifacts
+*.zip
+*.csv
+*.json.gz
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.env
