@@ -9,10 +9,9 @@ A full-stack Python system that scrapes UFC fighter and fight data, trains a Neu
 ```
 ufc_matchmaker/
 ├── scrapers/
-│   ├── sherdog_scraper.py      # Selenium scraper for Sherdog fighter/event data
+│   ├── ufc_api_wrapper.py      # Wrapper around FritzCapuyan/ufc-api (Sherdog fighter/event data)
 │   ├── ufc_stats_scraper.py    # Selenium scraper for UFCStats.com (detailed per-fight stats)
-│   ├── tapology_scraper.py     # Selenium scraper for Tapology (odds, rankings)
-│   └── ufc_api_wrapper.py      # Wrapper around FritzCapuyan/ufc-api
+│   └── tapology_scraper.py     # Selenium scraper for Tapology (odds, rankings)
 ├── data/
 │   ├── db.py                   # SQLite database manager
 │   ├── schema.sql              # Database schema
@@ -61,7 +60,7 @@ python main.py dashboard
 | Source | Data | Method |
 |---|---|---|
 | UFCStats.com | Per-fight strike/TD/control splits, round-by-round | Selenium |
-| Sherdog.com | Fighter career stats, win methods, history | ufc-api + Selenium |
+| Sherdog.com | Fighter career stats, win methods, history | ufc-api wrapper |
 | Tapology.com | Betting odds history, rankings, fan interest | Selenium |
 | UFC.com | Official rankings, weight classes | Selenium |
 
