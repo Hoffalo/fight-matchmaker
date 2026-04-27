@@ -28,11 +28,12 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, TensorDataset
 from sklearn.preprocessing import StandardScaler
 
 from data.db import Database
-from models.feature_engineering import build_matchup_vector
+from models.data_splits import build_raw_pairs, augment_pair, temporal_split
+from models.feature_engineering import build_full_matchup_vector
 from models.fight_quality_nn import FightQualityNN
 from config import NN
 
@@ -64,17 +65,41 @@ def build_classification_dataset(
     db: Database,
 ) -> tuple[np.ndarray, np.ndarray, dict]:
     """
-    Like build_training_dataset but also returns metadata (fight_id and
-    event_date for each row), which Mattheus's temporal split + group-by-fight
-    logic depends on.
+    Build a fully-augmented dataset (one row per matchup ordering).
 
-    The returned `meta` dict has the same length as X and y:
-      meta["fight_id"]   : np.int64  array, shape (N,)
-      meta["event_date"] : np.ndarray of ISO date strings, shape (N,)
-    Both (A,B) and (B,A) augmentation pairs share the same fight_id, so
-    splitting by fight_id keeps them in the same fold.
+    Use this when you need the entire dataset without splitting — e.g. for
+    full-data evaluation. For TRAINING, prefer build_raw_pairs() + temporal_split()
+    so augmentation happens within each split (M2 leakage fix).
+
+    Returns (X, y, meta) where meta has `fight_id` and `event_date`.
     """
-    logger.info("Building classification dataset from DB...")
+    raw = build_raw_pairs(db)
+    if len(raw["f1"]) == 0:
+        raise ValueError(
+            "No fights with both fighter IDs found in DB. "
+            "Run the data pipeline first: python main.py collect"
+        )
+    X, y, meta = augment_pair(raw)
+    pos = int(y.sum())
+    logger.info(
+        "Augmented dataset: %d rows (%d fights × 2), %d features, positives=%d (%.1f%%)",
+        len(X), len(raw["f1"]), X.shape[1], pos, 100.0 * pos / max(len(y), 1),
+    )
+    return X, y, meta
+
+
+def build_classification_dataset_72(
+    db: Database,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Same as build_classification_dataset but produces 72-dim feature vectors
+    (24 fighter A + 24 fighter B + 24 matchup cross-features) using
+    build_full_matchup_vector().
+
+    Used by the binary classifier pipeline (baselines.py, nn_binary.py)
+    where the cross-features are the strongest entertainment predictors.
+    """
+    logger.info("Building 72-dim classification dataset from DB...")
 
     with db.connect() as conn:
         rows = conn.execute(
@@ -120,8 +145,8 @@ def build_classification_dataset(
             continue
 
         label = float(fight["is_bonus_fight"] or 0)
-        vec_ab = build_matchup_vector(f1, f2)
-        vec_ba = build_matchup_vector(f2, f1)
+        vec_ab = build_full_matchup_vector(f1, f2)
+        vec_ba = build_full_matchup_vector(f2, f1)
 
         for vec in (vec_ab, vec_ba):
             X_rows.append(vec)
@@ -138,7 +163,7 @@ def build_classification_dataset(
 
     pos = int(y.sum())
     logger.info(
-        "Dataset ready: %d samples, %d features, positive class = %d (%.1f%%); "
+        "Dataset ready (72-dim): %d samples, %d features, positive class = %d (%.1f%%); "
         "skipped %d fights with missing profiles",
         len(X), X.shape[1], pos, 100.0 * pos / max(len(y), 1), skipped,
     )
@@ -188,25 +213,28 @@ def train(db: Database, cfg: dict = None) -> FightQualityNN:
     if cfg is None:
         cfg = NN
 
-    # ── 1. Build dataset ─────────────────────────────────────────────────
-    X, y = build_training_dataset(db)
+    # ── 1. Build raw fights then temporal split (M2: split → augment) ───
+    raw = build_raw_pairs(db)
+    if len(raw["f1"]) == 0:
+        raise ValueError(
+            "No fights with both fighter IDs found in DB. "
+            "Run the data pipeline first: python main.py collect"
+        )
+    X_train, y_train, X_val, y_val, X_test, y_test, *_ = temporal_split(raw)
 
-    # ── 2. Fit + apply feature scaler ────────────────────────────────────
-    scaler = fit_scaler(X, save_path=cfg["scaler_save_path"])
-    X_scaled = scaler.transform(X).astype(np.float32)
+    # ── 2. Fit feature scaler on TRAIN ONLY, then transform val/test ────
+    # (Doc reminder: never fit on full data — that leaks val/test stats.)
+    scaler = fit_scaler(X_train, save_path=cfg["scaler_save_path"])
+    X_train_scaled = scaler.transform(X_train).astype(np.float32)
+    X_val_scaled   = scaler.transform(X_val).astype(np.float32)
 
-    # ── 3. Split into train / validation ─────────────────────────────────
-    dataset   = TensorDataset(
-        torch.from_numpy(X_scaled),
-        torch.from_numpy(y),
-    )
-    val_size  = max(1, int(len(dataset) * cfg["val_split"]))
-    train_size = len(dataset) - val_size
-    train_ds, val_ds = random_split(dataset, [train_size, val_size])
-
+    # ── 3. Build dataloaders ─────────────────────────────────────────────
+    train_ds = TensorDataset(torch.from_numpy(X_train_scaled), torch.from_numpy(y_train))
+    val_ds   = TensorDataset(torch.from_numpy(X_val_scaled),   torch.from_numpy(y_val))
     train_loader = DataLoader(train_ds, batch_size=cfg["batch_size"], shuffle=True)
     val_loader   = DataLoader(val_ds,   batch_size=cfg["batch_size"], shuffle=False)
 
+    train_size, val_size = len(train_ds), len(val_ds)
     logger.info("Train: %d samples  |  Val: %d samples", train_size, val_size)
 
     # ── 4. Instantiate model, optimiser, scheduler ───────────────────────
