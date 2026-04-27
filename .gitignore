@@ -17,6 +17,11 @@ data/*.sqlite
 *.csv
 *.json.gz
 
+# Exception: ground-truth label CSVs are checked in so teammates can sync
+# without re-scraping Wikipedia. Exported by data/export_labels.py.
+!data/labels/
+!data/labels/*.csv
+
 # OS / IDE
 .DS_Store
 Thumbs.db
