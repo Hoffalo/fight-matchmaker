@@ -2,216 +2,132 @@
 models/data_loader.py
 Canonical data loading for the UFC fight entertainment prediction pipeline.
 
-Reads real fight data from the SQLite DB, builds 72-dim feature vectors,
-applies a temporal train/val/test split, and performs symmetric augmentation
-AFTER splitting so both orderings of each fight stay in the same fold.
+Delegates to the split/augmentation infrastructure in data_splits.py (Mattheus's
+M1/M2/M3 work) while using 72-dim feature vectors with matchup cross-features
+(build_full_matchup_vector from feature_engineering.py).
 
-Schema assumptions (from data/db.py):
-  - fights table:    id, fighter1_id, fighter2_id, event_id, is_bonus_fight
-  - events table:    id, date
-  - fighters table:  all career stats consumed by feature_engineering.py
-  - is_bonus_fight:  populated by scrapers/wikipedia_bonus_scraper.py
-                     and db.refresh_bonus_labels()
+This module is the single entry point for all classification models
+(baselines.py, nn_binary.py, matchmaker_v2.py).
 
 Usage
 -----
-    from models.data_loader import load_real_data
+    from models.data_loader import load_real_data, get_canonical_splits
 
-    data = load_real_data("data/ufc_matchmaker.db")
-    # data["X_train"], data["y_train"], ... data["scaler"], data["feature_names"]
+    # Full pipeline (query DB → split → augment → scale):
+    data = load_real_data()
 
-    # Or pass straight into BaselineComparison:
-    bc = BaselineComparison()
-    bc.load_data(data)
+    # Or just get splits without scaling (for custom preprocessing):
+    splits = get_canonical_splits()
 """
 import logging
-import sqlite3
 from pathlib import Path
 
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
-from models.feature_engineering import (
-    ALL_FEATURE_NAMES,
-    build_full_matchup_vector,
-    extract_fighter_features,
-)
+from models.feature_engineering import ALL_FEATURE_NAMES
 
 logger = logging.getLogger(__name__)
 
 N_FEATURES = 72
 
 # Match the actual DB date ranges (Jan 2025 – present).
-# These mirror models/data_splits.py for consistency.
+# These mirror models/data_splits.py VAL_CUTOFF / TEST_CUTOFF.
 TRAIN_CUTOFF = "2025-09-01"   # train: Jan 2025 – Aug 2025
 VAL_CUTOFF   = "2026-01-01"   # val: Sep 2025 – Dec 2025; test: Jan 2026+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core loader
+# Core loader — uses partner's split infrastructure with 72-dim features
 # ─────────────────────────────────────────────────────────────────────────────
 
-def load_real_data(
+def get_canonical_splits(
     db_path: str = "data/ufc_matchmaker.db",
     train_cutoff: str = TRAIN_CUTOFF,
     val_cutoff: str = VAL_CUTOFF,
 ) -> dict:
     """
-    Load fight data from the real SQLite DB and prepare train/val/test splits.
+    Canonical split pipeline using data_splits.py infrastructure + 72-dim features.
 
     Pipeline
     --------
-    1. Query all fights with is_bonus_fight labels + event dates
-    2. Build 72-dim feature vectors (single ordering per fight)
-    3. Temporal split by event date
-    4. Symmetric augmentation WITHIN each split — both (A,B) and (B,A)
-       orderings stay in the same fold, preventing data leakage
-    5. Fit StandardScaler on training data only
-
-    Default cutoffs match the actual DB date range (Jan 2025 – present):
-      train : < 2025-09-01   (Jan – Aug 2025)
-      val   : [2025-09-01, 2026-01-01)  (Sep – Dec 2025)
-      test  : >= 2026-01-01  (Jan 2026 – present)
-
-    Parameters
-    ----------
-    db_path      : path to the SQLite database
-    train_cutoff : fights before this date → train (default 2025-09-01)
-    val_cutoff   : fights in [train_cutoff, val_cutoff) → val;
-                   fights on/after val_cutoff → test (default 2026-01-01)
+    1. build_raw_pairs(db) → one row per fight, raw fighter dicts
+    2. temporal_split_raw() → split by date BEFORE augmentation
+    3. augment_pair(vector_fn=build_full_matchup_vector) → 72-dim, both orderings
+    4. assert_no_fight_id_leakage() → runtime safety check
+    5. Fit StandardScaler on train only
 
     Returns
     -------
     dict with keys:
-        X_train, y_train       — scaled training arrays
+        X_train, y_train       — scaled training arrays (float32)
         X_val, y_val           — scaled validation arrays
         X_test, y_test         — scaled test arrays
         scaler                 — fitted StandardScaler
         feature_names          — list of 72 feature names
         event_ids_test         — int array mapping test rows to events
+        raw_train              — raw train dict (for k-fold CV downstream)
         summary                — dict with dataset statistics
     """
-    db_path = str(Path(db_path).resolve()) if not Path(db_path).is_absolute() else db_path
-    if not Path(db_path).exists():
+    from data.db import Database
+    from models.data_splits import (
+        build_raw_pairs,
+        temporal_split_raw,
+        augment_pair,
+        assert_no_fight_id_leakage,
+        build_full_matchup_vector,
+    )
+
+    db_path_resolved = str(Path(db_path).resolve()) if not Path(db_path).is_absolute() else db_path
+    if not Path(db_path_resolved).exists():
         raise FileNotFoundError(
-            f"Database not found at {db_path}. "
+            f"Database not found at {db_path_resolved}. "
             "Run the data pipeline first: python main.py collect"
         )
 
-    logger.info("Loading fight data from %s ...", db_path)
+    db = Database(db_path_resolved)
 
-    # ── 1. Query fights ──────────────────────────────────────────────────
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+    # ── 1. Load raw pairs (one row per fight, no vectors yet) ────────────
+    raw = build_raw_pairs(db)
+    total_fights = len(raw["y"])
 
-    fights = [dict(r) for r in conn.execute(
-        """
-        SELECT
-            f.id            AS fight_id,
-            f.fighter1_id,
-            f.fighter2_id,
-            f.is_bonus_fight,
-            f.event_id,
-            e.date          AS event_date
-        FROM fights f
-        LEFT JOIN events e ON f.event_id = e.id
-        WHERE f.fighter1_id IS NOT NULL
-          AND f.fighter2_id IS NOT NULL
-          AND e.date IS NOT NULL
-        ORDER BY e.date ASC
-        """
-    ).fetchall()]
-
-    if not fights:
-        conn.close()
+    if total_fights == 0:
         raise ValueError(
-            "No usable fights found in DB (need fighter IDs and event dates). "
-            "Run the data pipeline first."
+            "No fights with both fighter IDs found in DB. "
+            "Run the data pipeline first: python main.py collect"
         )
 
-    # ── 2. Load fighter cache ────────────────────────────────────────────
-    fighters: dict[int, dict] = {
-        row["id"]: dict(row)
-        for row in conn.execute("SELECT * FROM fighters").fetchall()
-    }
-    conn.close()
+    # ── 2. Temporal split on raw fights ──────────────────────────────────
+    raw_train, raw_val, raw_test = temporal_split_raw(
+        raw, val_cutoff=train_cutoff, test_cutoff=val_cutoff,
+    )
 
-    # ── 3. Build vectors (SINGLE ordering per fight, pre-split) ──────────
-    quality_issues = _QualityTracker()
+    if len(raw_train["y"]) == 0:
+        raise ValueError(f"No training fights before {train_cutoff}.")
+    if len(raw_val["y"]) == 0:
+        raise ValueError(f"No validation fights in [{train_cutoff}, {val_cutoff}).")
+    if len(raw_test["y"]) == 0:
+        raise ValueError(f"No test fights on/after {val_cutoff}.")
 
-    records: list[dict] = []
-    for fight in fights:
-        f1 = fighters.get(fight["fighter1_id"])
-        f2 = fighters.get(fight["fighter2_id"])
+    # ── 3. Augment within each split (72-dim) ────────────────────────────
+    vector_fn = build_full_matchup_vector
 
-        if f1 is None or f2 is None:
-            quality_issues.record("missing_fighter_profile", fight["fight_id"])
-            continue
+    X_train, y_train, meta_train = augment_pair(raw_train, vector_fn=vector_fn)
+    X_val, y_val, meta_val       = augment_pair(raw_val, vector_fn=vector_fn)
+    X_test, y_test, meta_test    = augment_pair(raw_test, vector_fn=vector_fn)
 
-        vec = build_full_matchup_vector(f1, f2)
+    # ── 4. Leakage assertion ─────────────────────────────────────────────
+    assert_no_fight_id_leakage(meta_train, meta_val, meta_test)
 
-        nan_count = int(np.isnan(vec).sum())
-        if nan_count > 0:
-            quality_issues.record("nan_features", fight["fight_id"], detail=f"{nan_count} NaNs")
-            vec = np.nan_to_num(vec, nan=0.0)
+    # ── 5. Handle NaNs ───────────────────────────────────────────────────
+    nan_count = int(np.isnan(X_train).sum() + np.isnan(X_val).sum() + np.isnan(X_test).sum())
+    if nan_count > 0:
+        logger.warning("Found %d NaN values in features — replacing with 0.", nan_count)
+        X_train = np.nan_to_num(X_train, nan=0.0)
+        X_val   = np.nan_to_num(X_val, nan=0.0)
+        X_test  = np.nan_to_num(X_test, nan=0.0)
 
-        records.append({
-            "fight_id": fight["fight_id"],
-            "event_id": fight["event_id"],
-            "event_date": fight["event_date"],
-            "label": int(fight["is_bonus_fight"] or 0),
-            "vec_ab": vec,
-            "f1": f1,
-            "f2": f2,
-        })
-
-    # ── 4. Temporal split (on unique fights, BEFORE augmentation) ────────
-    train_recs = [r for r in records if r["event_date"] < train_cutoff]
-    val_recs   = [r for r in records if train_cutoff <= r["event_date"] < val_cutoff]
-    test_recs  = [r for r in records if r["event_date"] >= val_cutoff]
-
-    if not train_recs:
-        raise ValueError(f"No training fights before {train_cutoff}. Check date data.")
-    if not val_recs:
-        raise ValueError(f"No validation fights in [{train_cutoff}, {val_cutoff}). Check date data.")
-    if not test_recs:
-        raise ValueError(f"No test fights on/after {val_cutoff}. Check date data.")
-
-    # ── 5. Symmetric augmentation WITHIN each split ──────────────────────
-    def _augment(recs: list[dict]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Add (B,A) ordering for each fight. Returns X, y, event_ids."""
-        X_rows, y_rows, eids = [], [], []
-        for r in recs:
-            vec_ba = build_full_matchup_vector(r["f2"], r["f1"])
-
-            nan_count = int(np.isnan(vec_ba).sum())
-            if nan_count > 0:
-                vec_ba = np.nan_to_num(vec_ba, nan=0.0)
-
-            X_rows.append(r["vec_ab"])
-            X_rows.append(vec_ba)
-            y_rows.extend([r["label"], r["label"]])
-            eids.extend([r["event_id"], r["event_id"]])
-        return (
-            np.array(X_rows, dtype=np.float32),
-            np.array(y_rows, dtype=np.int32),
-            np.array(eids, dtype=np.int32),
-        )
-
-    X_train, y_train, _ = _augment(train_recs)
-    X_val, y_val, _     = _augment(val_recs)
-    X_test, y_test, event_ids_test = _augment(test_recs)
-
-    # ── 6. Feature-level NaN / constant checks ───────────────────────────
-    for col_idx in range(N_FEATURES):
-        col = X_train[:, col_idx]
-        if np.all(col == col[0]):
-            quality_issues.record(
-                "constant_feature", ALL_FEATURE_NAMES[col_idx],
-                detail=f"value={col[0]:.4f}",
-            )
-
-    # ── 7. Fit scaler on train only ──────────────────────────────────────
+    # ── 6. Fit scaler on train only ──────────────────────────────────────
     scaler = StandardScaler()
     scaler.fit(X_train)
 
@@ -219,106 +135,99 @@ def load_real_data(
     X_val_scaled   = scaler.transform(X_val).astype(np.float32)
     X_test_scaled  = scaler.transform(X_test).astype(np.float32)
 
-    # ── 8. Summary ───────────────────────────────────────────────────────
-    def _date_range(recs):
-        dates = [r["event_date"] for r in recs]
-        return min(dates), max(dates)
+    # ── 7. Build event_ids for test set ──────────────────────────────────
+    test_fight_ids = meta_test["fight_id"]
+    unique_fights = np.unique(test_fight_ids)
+    fight_to_event = {fid: i for i, fid in enumerate(unique_fights)}
+    event_ids_test = np.array([fight_to_event[fid] for fid in test_fight_ids], dtype=np.int32)
 
+    # ── 8. Summary ───────────────────────────────────────────────────────
     summary = {
-        "total_unique_fights": len(records),
-        "train": {"fights": len(train_recs), "samples": len(y_train),
-                  "pos": int(y_train.sum()), "pos_pct": float(y_train.mean() * 100),
-                  "date_range": _date_range(train_recs)},
-        "val":   {"fights": len(val_recs), "samples": len(y_val),
-                  "pos": int(y_val.sum()), "pos_pct": float(y_val.mean() * 100),
-                  "date_range": _date_range(val_recs)},
-        "test":  {"fights": len(test_recs), "samples": len(y_test),
-                  "pos": int(y_test.sum()), "pos_pct": float(y_test.mean() * 100),
-                  "date_range": _date_range(test_recs)},
-        "features": N_FEATURES,
-        "quality_issues": quality_issues.issues,
+        "total_unique_fights": total_fights,
+        "feature_dim": N_FEATURES,
+        "train": {
+            "fights": len(raw_train["y"]),
+            "samples": len(y_train),
+            "pos": int(y_train.sum()),
+            "pos_pct": float(y_train.mean() * 100),
+        },
+        "val": {
+            "fights": len(raw_val["y"]),
+            "samples": len(y_val),
+            "pos": int(y_val.sum()),
+            "pos_pct": float(y_val.mean() * 100),
+        },
+        "test": {
+            "fights": len(raw_test["y"]),
+            "samples": len(y_test),
+            "pos": int(y_test.sum()),
+            "pos_pct": float(y_test.mean() * 100),
+        },
+        "nan_features_replaced": nan_count,
     }
 
-    _print_summary(summary, quality_issues)
+    _print_summary(summary)
 
     return {
-        "X_train": X_train_scaled, "y_train": y_train,
-        "X_val": X_val_scaled, "y_val": y_val,
-        "X_test": X_test_scaled, "y_test": y_test,
+        "X_train": X_train_scaled, "y_train": y_train.astype(np.int32),
+        "X_val": X_val_scaled, "y_val": y_val.astype(np.int32),
+        "X_test": X_test_scaled, "y_test": y_test.astype(np.int32),
         "scaler": scaler,
         "feature_names": list(ALL_FEATURE_NAMES),
         "event_ids_test": event_ids_test,
+        "raw_train": raw_train,
         "summary": summary,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Quality tracking
-# ─────────────────────────────────────────────────────────────────────────────
+def load_real_data(
+    db_path: str = "data/ufc_matchmaker.db",
+    train_cutoff: str = TRAIN_CUTOFF,
+    val_cutoff: str = VAL_CUTOFF,
+) -> dict:
+    """
+    Load fight data from the real SQLite DB — delegates to get_canonical_splits().
 
-class _QualityTracker:
-    """Accumulates data quality warnings during loading."""
-
-    def __init__(self) -> None:
-        self.issues: dict[str, list] = {}
-
-    def record(self, category: str, item, detail: str = "") -> None:
-        self.issues.setdefault(category, []).append(
-            {"item": item, "detail": detail} if detail else item
-        )
-
-    @property
-    def has_issues(self) -> bool:
-        return bool(self.issues)
-
-    def count(self, category: str) -> int:
-        return len(self.issues.get(category, []))
+    This is the backward-compatible entry point used by baselines.py,
+    nn_binary.py, and matchmaker_v2.py.
+    """
+    return get_canonical_splits(
+        db_path=db_path,
+        train_cutoff=train_cutoff,
+        val_cutoff=val_cutoff,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pretty printing
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _print_summary(summary: dict, quality: _QualityTracker) -> None:
+def _print_summary(summary: dict) -> None:
     """Print a clean data summary to stdout and logger."""
     lines = [
         "",
         "=" * 72,
-        "  DATA SUMMARY — UFC Fight Entertainment Dataset",
+        "  DATA SUMMARY — UFC Fight Entertainment Dataset (72-dim)",
         "=" * 72,
         f"  Total unique fights:  {summary['total_unique_fights']}",
-        f"  Feature dimensions:   {summary['features']}",
+        f"  Feature dimensions:   {summary['feature_dim']}",
         "",
     ]
 
     for split_name in ("train", "val", "test"):
         s = summary[split_name]
-        d0, d1 = s["date_range"]
         lines.append(
             f"  {split_name.upper():<6}  "
             f"{s['fights']:>5} fights  ({s['samples']:>5} samples w/ augmentation)  "
-            f"{s['pos']:>4} pos ({s['pos_pct']:.1f}%)  "
-            f"  [{d0} → {d1}]"
+            f"{s['pos']:>4} pos ({s['pos_pct']:.1f}%)"
         )
 
     lines.append("")
 
-    if quality.has_issues:
-        lines.append("  DATA QUALITY FLAGS:")
-        for cat, items in quality.issues.items():
-            lines.append(f"    - {cat}: {len(items)} occurrences")
-            if cat == "nan_features":
-                for entry in items[:5]:
-                    lines.append(f"        fight {entry['item']}: {entry['detail']}")
-                if len(items) > 5:
-                    lines.append(f"        ... and {len(items) - 5} more")
-            elif cat == "constant_feature":
-                for entry in items[:10]:
-                    lines.append(f"        {entry['item']}: {entry['detail']}")
-            elif cat == "missing_fighter_profile":
-                lines.append(f"        fight_ids: {items[:10]}{'...' if len(items) > 10 else ''}")
+    if summary["nan_features_replaced"] > 0:
+        lines.append(f"  WARNING: {summary['nan_features_replaced']} NaN values replaced with 0.")
     else:
-        lines.append("  Data quality: no issues detected.")
+        lines.append("  Data quality: no NaN values detected.")
 
     lines.append("=" * 72)
 
@@ -341,13 +250,21 @@ if __name__ == "__main__":
 
     db_path = sys.argv[1] if len(sys.argv) > 1 else "data/ufc_matchmaker.db"
     try:
-        data = load_real_data(db_path)
-        print(f"\nReturned arrays:")
-        print(f"  X_train: {data['X_train'].shape}  y_train: {data['y_train'].shape}")
-        print(f"  X_val:   {data['X_val'].shape}  y_val:   {data['y_val'].shape}")
-        print(f"  X_test:  {data['X_test'].shape}  y_test:  {data['y_test'].shape}")
-        print(f"  Scaler fitted: {data['scaler'] is not None}")
-        print(f"  Feature names: {len(data['feature_names'])} names")
+        splits = get_canonical_splits(db_path)
+
+        print(f"\nFeature dimension: {splits['X_train'].shape[1]}")
+        print(f"Train: {splits['summary']['train']['fights']} unique → "
+              f"{splits['summary']['train']['samples']} augmented")
+        print(f"Val:   {splits['summary']['val']['fights']} unique → "
+              f"{splits['summary']['val']['samples']} augmented")
+        print(f"Test:  {splits['summary']['test']['fights']} unique → "
+              f"{splits['summary']['test']['samples']} augmented")
+        print(f"Train positive rate: {splits['y_train'].mean():.3f}")
+        print(f"Val positive rate:   {splits['y_val'].mean():.3f}")
+        print(f"Test positive rate:  {splits['y_test'].mean():.3f}")
+        assert splits["X_train"].shape[1] == 72, "Feature dim must be 72"
+        print("\nAll checks passed.")
+
     except FileNotFoundError as e:
         print(f"ERROR: {e}")
         print("To generate a test DB, run: python main.py collect")

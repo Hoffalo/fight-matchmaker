@@ -1,11 +1,14 @@
 """
 models/data_splits.py
-Temporal train / val / test split for the UFC fight quality classifier.
+Temporal train / val / test split for the UFC fight entertainment classifier.
 
 M1 — temporal split.
 M2 — leak-safe ordering: split raw fights by date FIRST, then augment
      (A, B) / (B, A) within each split so both orderings of a given fight
      can never land in different splits.
+M4 — 72-dim feature support: augment_pair accepts a vector_fn parameter
+     to use build_full_matchup_vector (72-dim with cross-features) instead
+     of the legacy 48-dim build_matchup_vector.
 
 Actual database date ranges (corrected from the original plan doc):
   train : Jan 2025 – Aug 2025   (event_date < val_cutoff)
@@ -18,7 +21,10 @@ Usage
     from models.data_splits import build_raw_pairs, temporal_split
 
     raw = build_raw_pairs(Database())
+    # 72-dim (default — includes matchup cross-features):
     X_tr, y_tr, X_va, y_va, X_te, y_te, m_tr, m_va, m_te = temporal_split(raw)
+    # 48-dim (legacy regression model):
+    X_tr, y_tr, ... = temporal_split(raw, use_72_dim=False)
 """
 import importlib.util as _ilu
 import logging
@@ -51,7 +57,11 @@ def _load_sibling(name: str):
     return mod
 
 
-build_matchup_vector = _load_sibling("feature_engineering").build_matchup_vector
+_fe = _load_sibling("feature_engineering")
+build_matchup_vector = _fe.build_matchup_vector
+build_full_matchup_vector = _fe.build_full_matchup_vector
+
+DEFAULT_VECTOR_FN = build_full_matchup_vector  # 72-dim (active pipeline)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -121,14 +131,27 @@ def build_raw_pairs(db) -> dict:
 # Augmentation  ((A, B) and (B, A) both share the same fight_id)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def augment_pair(raw: dict) -> tuple[np.ndarray, np.ndarray, dict]:
+def augment_pair(raw: dict, vector_fn=None) -> tuple[np.ndarray, np.ndarray, dict]:
     """
     Expand one row per fight into two rows: (A, B) and (B, A).
     Both rows share the same fight_id and event_date — so any group-aware
     splitter that respects fight_id keeps them together.
 
     M2 step 2: both orderings share a fight_id.
+    M4: vector_fn controls feature dimension (72-dim default, 48-dim legacy).
+        Cross-features are recomputed for the (B,A) ordering because some
+        (reach_advantage, rankings_gap) are directional.
+
+    Parameters
+    ----------
+    raw       : dict from build_raw_pairs() or _select_raw()
+    vector_fn : callable(fighter_a_dict, fighter_b_dict) -> np.ndarray.
+                Defaults to build_full_matchup_vector (72-dim).
+                Pass build_matchup_vector for legacy 48-dim.
     """
+    if vector_fn is None:
+        vector_fn = DEFAULT_VECTOR_FN
+
     X, y, fids, dates = [], [], [], []
     f1_arr, f2_arr = raw["f1"], raw["f2"]
     y_arr, fid_arr, date_arr = raw["y"], raw["fight_id"], raw["event_date"]
@@ -138,7 +161,7 @@ def augment_pair(raw: dict) -> tuple[np.ndarray, np.ndarray, dict]:
         label  = float(y_arr[i])
         fid    = int(fid_arr[i])
         date   = date_arr[i]
-        for vec in (build_matchup_vector(f1, f2), build_matchup_vector(f2, f1)):
+        for vec in (vector_fn(f1, f2), vector_fn(f2, f1)):
             X.append(vec)
             y.append(label)
             fids.append(fid)
@@ -206,9 +229,18 @@ def temporal_split(
     raw: dict,
     val_cutoff: str = VAL_CUTOFF,
     test_cutoff: str = TEST_CUTOFF,
+    use_72_dim: bool = True,
 ) -> tuple:
     """
     Split raw fights by event_date and augment WITHIN each split.
+
+    Parameters
+    ----------
+    raw         : output of build_raw_pairs()
+    val_cutoff  : start of validation period
+    test_cutoff : start of test period
+    use_72_dim  : True → 72-dim vectors (default, classification pipeline)
+                  False → 48-dim vectors (legacy regression model)
 
     Returns
     -------
@@ -220,12 +252,13 @@ def temporal_split(
     - max(train_dates) < min(val_dates) < min(test_dates)   (M1 step 6)
     - no fight_id appears in more than one split            (M2 step 5)
     """
+    vector_fn = build_full_matchup_vector if use_72_dim else build_matchup_vector
     raw_train, raw_val, raw_test = temporal_split_raw(raw, val_cutoff, test_cutoff)
 
     # M2 step 4: augment WITHIN each split, never across.
-    X_tr, y_tr, meta_tr = augment_pair(raw_train)
-    X_va, y_va, meta_va = augment_pair(raw_val)
-    X_te, y_te, meta_te = augment_pair(raw_test)
+    X_tr, y_tr, meta_tr = augment_pair(raw_train, vector_fn=vector_fn)
+    X_va, y_va, meta_va = augment_pair(raw_val, vector_fn=vector_fn)
+    X_te, y_te, meta_te = augment_pair(raw_test, vector_fn=vector_fn)
 
     _print_split_sizes(
         raw_train["y"], raw_val["y"], raw_test["y"],
@@ -394,6 +427,7 @@ def kfold_split(
     n_splits: int = 5,
     strategy: str = "auto",
     random_state: int = 42,
+    use_72_dim: bool = True,
 ):
     """
     Generator yielding per-fold augmented arrays.
@@ -405,6 +439,7 @@ def kfold_split(
     Augmentation happens INSIDE each fold (M2 leakage fix carried into k-fold).
     Asserts no fight_id leakage within each fold.
     """
+    vector_fn = build_full_matchup_vector if use_72_dim else build_matchup_vector
     folds, strategy_used = kfold_indices(raw, n_splits, strategy, random_state)
     logger.info("k-fold strategy=%s  n_splits=%d", strategy_used, len(folds))
 
@@ -412,8 +447,8 @@ def kfold_split(
         raw_tr = _select_raw(raw, train_idx)
         raw_va = _select_raw(raw, val_idx)
 
-        X_tr, y_tr, m_tr = augment_pair(raw_tr)
-        X_va, y_va, m_va = augment_pair(raw_va)
+        X_tr, y_tr, m_tr = augment_pair(raw_tr, vector_fn=vector_fn)
+        X_va, y_va, m_va = augment_pair(raw_va, vector_fn=vector_fn)
 
         # Per-fold leakage check (M2 step 5 applied to CV).
         train_ids = set(m_tr["fight_id"].tolist())
@@ -431,6 +466,7 @@ def cv_score_sklearn(
     strategy: str = "auto",
     random_state: int = 42,
     metrics: tuple = ("f1", "accuracy", "roc_auc"),
+    use_72_dim: bool = True,
 ) -> dict:
     """
     Run k-fold CV with a fresh sklearn estimator per fold.
@@ -444,14 +480,17 @@ def cv_score_sklearn(
                         so each fold gets a fresh model.
     raw               : raw dict (typically raw_train from temporal_split_raw).
     metrics           : subset of {"f1", "accuracy", "roc_auc"}.
+    use_72_dim        : True → 72-dim features (default), False → 48-dim legacy.
 
     Returns
     -------
     dict mapping each metric name to {"mean": float, "std": float, "folds": list[float]}
-    plus "_strategy" key recording which splitter was used.
+    plus "_strategy" and "_feature_dim" keys.
     """
     from sklearn.preprocessing import StandardScaler
     from sklearn.metrics import f1_score, accuracy_score, roc_auc_score
+
+    vector_fn = build_full_matchup_vector if use_72_dim else build_matchup_vector
 
     metric_fns = {
         "f1":       lambda y, p, _: f1_score(y, p, zero_division=0),
@@ -463,19 +502,19 @@ def cv_score_sklearn(
     strategy_used = None
 
     folds, strategy_used = kfold_indices(raw, n_splits, strategy, random_state)
-    logger.info("CV strategy=%s  n_splits=%d", strategy_used, len(folds))
+    logger.info("CV strategy=%s  n_splits=%d  feature_dim=%d",
+                strategy_used, len(folds), 72 if use_72_dim else 48)
 
     for fold_i, (train_idx, val_idx) in enumerate(folds, start=1):
         raw_tr = _select_raw(raw, train_idx)
         raw_va = _select_raw(raw, val_idx)
 
-        X_tr, y_tr, m_tr = augment_pair(raw_tr)
-        X_va, y_va, m_va = augment_pair(raw_va)
+        X_tr, y_tr, m_tr = augment_pair(raw_tr, vector_fn=vector_fn)
+        X_va, y_va, m_va = augment_pair(raw_va, vector_fn=vector_fn)
 
         leak = set(m_tr["fight_id"].tolist()) & set(m_va["fight_id"].tolist())
         assert not leak, f"Fold {fold_i}: {len(leak)} fight_ids leaked across train/val"
 
-        # Scaler fit on train only (doc reminder).
         scaler = StandardScaler().fit(X_tr)
         X_tr_s = scaler.transform(X_tr)
         X_va_s = scaler.transform(X_va)
@@ -491,7 +530,11 @@ def cv_score_sklearn(
         for m in metrics:
             results[m].append(float(metric_fns[m](y_va, y_pred, y_proba)))
 
-    summary: dict = {"_strategy": strategy_used, "_n_splits": len(folds)}
+    summary: dict = {
+        "_strategy": strategy_used,
+        "_n_splits": len(folds),
+        "_feature_dim": 72 if use_72_dim else 48,
+    }
     for m, scores in results.items():
         if scores:
             summary[m] = {
