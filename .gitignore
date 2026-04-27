@@ -6,7 +6,7 @@ env/
 
 # Local data / logs / models
 logs/
-data/*.db
+# data/*.db
 data/*.sqlite
 *.pt
 *.pkl
@@ -32,7 +32,6 @@ Thumbs.db
 
 # Secrets — cloud service-account / API key files
 # (specific known leaks first, broader patterns after)
-automacao-clickup-*.json
 *service-account*.json
 *service_account*.json
 *credentials*.json
