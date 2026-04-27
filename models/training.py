@@ -45,81 +45,104 @@ logger = logging.getLogger(__name__)
 
 def build_training_dataset(db: Database) -> tuple[np.ndarray, np.ndarray]:
     """
-    Query the DB and build (X, y) arrays for training.
+    Build (X, y) arrays for training. y is the binary FOTN/POTN label.
 
     Returns
     -------
-    X : float32 array of shape (N, 48)
-        Each row is a matchup feature vector.
+    X : float32 array of shape (N, input_dim)
+        Each row is a matchup feature vector. Both (A,B) and (B,A) orderings
+        are emitted to teach the model symmetry — Mattheus's M2 task makes
+        sure both orderings stay in the same split.
     y : float32 array of shape (N,)
-        Each value is a fight quality score normalised to [0, 1].
+        1.0 if the fight was awarded a FOTN or POTN bonus, 0.0 otherwise.
     """
-    logger.info("Building training dataset from DB...")
+    X, y, _ = build_classification_dataset(db)
+    return X, y
 
-    # Only use fights that have a computed quality score AND both fighter IDs
+
+def build_classification_dataset(
+    db: Database,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Like build_training_dataset but also returns metadata (fight_id and
+    event_date for each row), which Mattheus's temporal split + group-by-fight
+    logic depends on.
+
+    The returned `meta` dict has the same length as X and y:
+      meta["fight_id"]   : np.int64  array, shape (N,)
+      meta["event_date"] : np.ndarray of ISO date strings, shape (N,)
+    Both (A,B) and (B,A) augmentation pairs share the same fight_id, so
+    splitting by fight_id keeps them in the same fold.
+    """
+    logger.info("Building classification dataset from DB...")
+
     with db.connect() as conn:
         rows = conn.execute(
             """
             SELECT
-                f.id,
+                f.id            AS fight_id,
                 f.fighter1_id,
                 f.fighter2_id,
-                f.fight_quality_score,
-                e.date
+                f.is_bonus_fight,
+                e.date          AS event_date
             FROM fights f
             LEFT JOIN events e ON f.event_id = e.id
-            WHERE f.fight_quality_score IS NOT NULL
-              AND f.fighter1_id IS NOT NULL
+            WHERE f.fighter1_id IS NOT NULL
               AND f.fighter2_id IS NOT NULL
-            ORDER BY e.date DESC
+            ORDER BY e.date ASC
             """
         ).fetchall()
 
     rows = [dict(r) for r in rows]
-    logger.info("Found %d fights with quality scores", len(rows))
-
+    logger.info("Found %d candidate fights in DB", len(rows))
     if not rows:
         raise ValueError(
-            "No fights with quality scores found in DB. "
+            "No fights with both fighter IDs found in DB. "
             "Run the data pipeline first: python main.py collect"
         )
 
-    # Build a fighter lookup cache to avoid N×2 DB hits
-    logger.info("Loading fighter profiles into memory cache...")
     fighters_cache: dict[int, dict] = {}
     with db.connect() as conn:
         for row in conn.execute("SELECT * FROM fighters").fetchall():
             fighters_cache[row["id"]] = dict(row)
 
-    X_rows, y_rows = [], []
+    X_rows: list[np.ndarray] = []
+    y_rows: list[float] = []
+    fight_ids: list[int] = []
+    dates: list[str] = []
 
+    skipped = 0
     for fight in rows:
         f1 = fighters_cache.get(fight["fighter1_id"])
         f2 = fighters_cache.get(fight["fighter2_id"])
-
-        # Skip if we don't have profile data for either fighter
         if f1 is None or f2 is None:
+            skipped += 1
             continue
 
-        score_norm = fight["fight_quality_score"] / 100.0  # → [0, 1]
-
-        # Add both orderings so the model learns symmetry
+        label = float(fight["is_bonus_fight"] or 0)
         vec_ab = build_matchup_vector(f1, f2)
         vec_ba = build_matchup_vector(f2, f1)
 
-        X_rows.append(vec_ab)
-        y_rows.append(score_norm)
-        X_rows.append(vec_ba)
-        y_rows.append(score_norm)
+        for vec in (vec_ab, vec_ba):
+            X_rows.append(vec)
+            y_rows.append(label)
+            fight_ids.append(fight["fight_id"])
+            dates.append(fight["event_date"] or "")
 
     X = np.array(X_rows, dtype=np.float32)
     y = np.array(y_rows, dtype=np.float32)
+    meta = {
+        "fight_id": np.array(fight_ids, dtype=np.int64),
+        "event_date": np.array(dates),
+    }
 
+    pos = int(y.sum())
     logger.info(
-        "Dataset ready: %d samples, %d features. Score range: %.1f – %.1f",
-        len(X), X.shape[1], y.min() * 100, y.max() * 100
+        "Dataset ready: %d samples, %d features, positive class = %d (%.1f%%); "
+        "skipped %d fights with missing profiles",
+        len(X), X.shape[1], pos, 100.0 * pos / max(len(y), 1), skipped,
     )
-    return X, y
+    return X, y, meta
 
 
 # ─────────────────────────────────────────────────────────────────────────────

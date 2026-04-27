@@ -111,7 +111,9 @@ class UFCStatsScraper:
                 continue
             name = link.get_text(strip=True)
             url  = link.get("href", "")
-            date_cell = cells[1].get_text(strip=True) if len(cells) > 1 else ""
+            # Date lives in span.b-statistics__date inside cells[0]; cells[1] is location.
+            date_span = cells[0].select_one("span.b-statistics__date")
+            date_cell = date_span.get_text(strip=True) if date_span else ""
             if name and url:
                 events.append({"name": name, "date": date_cell, "url": url})
 

@@ -102,7 +102,8 @@ CREATE TABLE IF NOT EXISTS fights (
     sig_strikes_pm    REAL,
     total_tds         INTEGER,
     knockdowns        INTEGER,
-    fight_quality_score REAL,  -- Our computed score
+    fight_quality_score REAL,  -- Legacy heuristic (no longer used as training target)
+    is_bonus_fight    INTEGER DEFAULT 0,  -- 1 if FOTN/POTN bonus awarded (training label)
 
     ufcstats_url    TEXT UNIQUE,
     last_updated    TEXT DEFAULT (datetime('now'))
@@ -148,12 +149,27 @@ CREATE TABLE IF NOT EXISTS fight_stats (
     ctrl_share       REAL
 );
 
+-- ── Fight Bonuses (FOTN / POTN ground-truth labels) ───────────────────────
+CREATE TABLE IF NOT EXISTS fight_bonuses (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id        INTEGER REFERENCES events(id),
+    fight_id        INTEGER REFERENCES fights(id),    -- NULL until matched
+    fighter_id      INTEGER REFERENCES fighters(id),  -- NULL if name not resolved
+    bonus_type      TEXT NOT NULL,                    -- 'FOTN' or 'POTN'
+    fighter_name    TEXT NOT NULL,                    -- raw name from source
+    source          TEXT DEFAULT 'wikipedia',
+    scraped_at      TEXT DEFAULT (datetime('now')),
+    UNIQUE(event_id, bonus_type, fighter_name)
+);
+
 -- ── Indexes ────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_fights_fighter1 ON fights(fighter1_id);
 CREATE INDEX IF NOT EXISTS idx_fights_fighter2 ON fights(fighter2_id);
 CREATE INDEX IF NOT EXISTS idx_fight_stats_fight ON fight_stats(fight_id);
 CREATE INDEX IF NOT EXISTS idx_fight_stats_fighter ON fight_stats(fighter_id);
 CREATE INDEX IF NOT EXISTS idx_fighters_weight_class ON fighters(weight_class);
+CREATE INDEX IF NOT EXISTS idx_fight_bonuses_fight ON fight_bonuses(fight_id);
+CREATE INDEX IF NOT EXISTS idx_fight_bonuses_event ON fight_bonuses(event_id);
 """
 
 
@@ -168,7 +184,36 @@ class Database:
     def _init_schema(self):
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            # Migration: add is_bonus_fight to existing fights tables
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(fights)")}
+            if "is_bonus_fight" not in cols:
+                conn.execute(
+                    "ALTER TABLE fights ADD COLUMN is_bonus_fight INTEGER DEFAULT 0"
+                )
+                logger.info("Migrated fights table: added is_bonus_fight column")
         logger.info("Database ready at %s", self.path)
+
+    # ── Bonus label refresh ──────────────────────────────────────────────────
+
+    def refresh_bonus_labels(self) -> int:
+        """
+        Mark every fight with at least one resolved row in fight_bonuses
+        as is_bonus_fight=1 (and the rest as 0). Returns count flagged.
+        """
+        with self.connect() as conn:
+            conn.execute("UPDATE fights SET is_bonus_fight = 0")
+            conn.execute(
+                """UPDATE fights SET is_bonus_fight = 1
+                   WHERE id IN (
+                       SELECT DISTINCT fight_id FROM fight_bonuses
+                       WHERE fight_id IS NOT NULL
+                   )"""
+            )
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM fights WHERE is_bonus_fight = 1"
+            ).fetchone()["n"]
+        logger.info("Refreshed bonus labels: %d fights flagged as is_bonus_fight=1", n)
+        return n
 
     @contextmanager
     def connect(self):
