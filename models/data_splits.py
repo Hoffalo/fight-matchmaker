@@ -158,6 +158,50 @@ def augment_pair(raw: dict) -> tuple[np.ndarray, np.ndarray, dict]:
 # Temporal split  (split first, augment within each split — M2 step 4)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _select_raw(raw: dict, idx) -> dict:
+    """Index into a raw dict, preserving the same shape."""
+    idx = np.asarray(idx)
+    return {
+        "f1":         [raw["f1"][i] for i in idx],
+        "f2":         [raw["f2"][i] for i in idx],
+        "y":          raw["y"][idx],
+        "fight_id":   raw["fight_id"][idx],
+        "event_date": np.asarray(raw["event_date"])[idx],
+    }
+
+
+def temporal_split_raw(
+    raw: dict,
+    val_cutoff: str = VAL_CUTOFF,
+    test_cutoff: str = TEST_CUTOFF,
+) -> tuple[dict, dict, dict]:
+    """
+    Split raw fights by event_date — no augmentation. Use this when you
+    want to do further splitting on the train portion (k-fold CV) without
+    inflating fold sizes via augmentation.
+
+    Returns (raw_train, raw_val, raw_test).
+    """
+    dates = np.asarray(raw["event_date"])
+
+    # M1 step 3: sort by event_date.
+    order = np.argsort(dates, kind="stable")
+    raw_sorted = _select_raw(raw, order)
+    dates_sorted = raw_sorted["event_date"]
+
+    # Rows without a date go to train.
+    train_mask = (dates_sorted < val_cutoff) | (dates_sorted == "")
+    val_mask   = (dates_sorted >= val_cutoff) & (dates_sorted < test_cutoff)
+    test_mask  = dates_sorted >= test_cutoff
+
+    raw_train = _select_raw(raw_sorted, np.where(train_mask)[0])
+    raw_val   = _select_raw(raw_sorted, np.where(val_mask)[0])
+    raw_test  = _select_raw(raw_sorted, np.where(test_mask)[0])
+
+    _assert_no_temporal_overlap(dates_sorted, train_mask, val_mask, test_mask)
+    return raw_train, raw_val, raw_test
+
+
 def temporal_split(
     raw: dict,
     val_cutoff: str = VAL_CUTOFF,
@@ -166,53 +210,17 @@ def temporal_split(
     """
     Split raw fights by event_date and augment WITHIN each split.
 
-    Parameters
-    ----------
-    raw          : dict from build_raw_pairs(db).
-    val_cutoff   : First date of the validation set (inclusive). ISO-8601.
-    test_cutoff  : First date of the test set (inclusive). ISO-8601.
-
     Returns
     -------
     X_train, y_train, X_val, y_val, X_test, y_test,
     meta_train, meta_val, meta_test
 
-    Each meta_* is a dict with `fight_id` and `event_date` arrays.
-
     Guarantees (asserted at runtime)
     --------------------------------
-    - max(train_dates) < min(val_dates) < min(test_dates)         (M1 step 6)
-    - no fight_id appears in more than one split                  (M2 step 5)
+    - max(train_dates) < min(val_dates) < min(test_dates)   (M1 step 6)
+    - no fight_id appears in more than one split            (M2 step 5)
     """
-    dates = np.asarray(raw["event_date"])
-
-    # M1 step 3: sort by event_date before splitting (defensive — DB query
-    # already orders by date, but this enforces the invariant).
-    order = np.argsort(dates, kind="stable")
-    dates_sorted = dates[order]
-    f1_sorted   = [raw["f1"][i] for i in order]
-    f2_sorted   = [raw["f2"][i] for i in order]
-    y_sorted    = raw["y"][order]
-    fid_sorted  = raw["fight_id"][order]
-
-    # Rows without a date go to train (conservative — never leak into val/test).
-    train_mask = (dates_sorted < val_cutoff) | (dates_sorted == "")
-    val_mask   = (dates_sorted >= val_cutoff) & (dates_sorted < test_cutoff)
-    test_mask  = dates_sorted >= test_cutoff
-
-    def _slice(mask):
-        idx = np.where(mask)[0]
-        return {
-            "f1":         [f1_sorted[i] for i in idx],
-            "f2":         [f2_sorted[i] for i in idx],
-            "y":          y_sorted[mask],
-            "fight_id":   fid_sorted[mask],
-            "event_date": dates_sorted[mask],
-        }
-
-    raw_train = _slice(train_mask)
-    raw_val   = _slice(val_mask)
-    raw_test  = _slice(test_mask)
+    raw_train, raw_val, raw_test = temporal_split_raw(raw, val_cutoff, test_cutoff)
 
     # M2 step 4: augment WITHIN each split, never across.
     X_tr, y_tr, meta_tr = augment_pair(raw_train)
@@ -224,7 +232,6 @@ def temporal_split(
         y_tr, y_va, y_te,
         val_cutoff, test_cutoff,
     )
-    _assert_no_temporal_overlap(dates_sorted, train_mask, val_mask, test_mask)
     assert_no_fight_id_leakage(meta_tr, meta_va, meta_te)
 
     return X_tr, y_tr, X_va, y_va, X_te, y_te, meta_tr, meta_va, meta_te
@@ -312,3 +319,202 @@ def _assert_no_temporal_overlap(
         min(val_dates)   if len(val_dates)   else "N/A",
         min(test_dates)  if len(test_dates)  else "N/A",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# M3 — k-fold cross-validation on the raw (one-row-per-fight) train set
+# ─────────────────────────────────────────────────────────────────────────────
+
+# How many positives a val fold needs before we trust TimeSeriesSplit.
+# Below this, we fall back to StratifiedKFold (M3 step 5).
+_MIN_MINORITY_PER_FOLD = 2
+
+
+def kfold_indices(
+    raw: dict,
+    n_splits: int = 5,
+    strategy: str = "auto",
+    random_state: int = 42,
+) -> tuple[list[tuple[np.ndarray, np.ndarray]], str]:
+    """
+    Generate k-fold (train_idx, val_idx) pairs over RAW fights.
+
+    Parameters
+    ----------
+    raw          : output of build_raw_pairs() OR a raw split (e.g. raw_train
+                   from temporal_split_raw). Indices are positional into raw.
+    n_splits     : number of folds (default 5, per M3 step 1).
+    strategy     : "auto" | "timeseries" | "stratified"
+                   "auto" tries TimeSeriesSplit; if any val fold has fewer
+                   than _MIN_MINORITY_PER_FOLD positives, falls back to
+                   StratifiedKFold (M3 step 5).
+    random_state : 42 (sprint reproducibility convention).
+
+    Returns
+    -------
+    folds          : list of (train_idx, val_idx) numpy arrays
+    strategy_used  : "timeseries" or "stratified"
+    """
+    from sklearn.model_selection import TimeSeriesSplit, StratifiedKFold  # lazy
+
+    n = len(raw["y"])
+    if n < n_splits + 1:
+        raise ValueError(f"Not enough samples ({n}) for {n_splits}-fold CV")
+
+    y = raw["y"]
+    indices = np.arange(n)
+
+    if strategy in ("auto", "timeseries"):
+        # TimeSeriesSplit assumes data is already sorted by time. The raw
+        # dict from build_raw_pairs / temporal_split_raw is sorted by date.
+        ts = TimeSeriesSplit(n_splits=n_splits)
+        folds = [(tr, va) for tr, va in ts.split(indices)]
+
+        ok = all(int(y[va].sum()) >= _MIN_MINORITY_PER_FOLD for _, va in folds)
+        if ok or strategy == "timeseries":
+            if not ok:
+                logger.warning(
+                    "TimeSeriesSplit folds have <%d positives but strategy "
+                    "was forced to 'timeseries'. Metrics may be unstable.",
+                    _MIN_MINORITY_PER_FOLD,
+                )
+            return folds, "timeseries"
+        logger.info(
+            "TimeSeriesSplit produced folds with too-few positives — "
+            "falling back to StratifiedKFold (M3 step 5)."
+        )
+
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    folds = [(tr, va) for tr, va in skf.split(indices, y)]
+    return folds, "stratified"
+
+
+def kfold_split(
+    raw: dict,
+    n_splits: int = 5,
+    strategy: str = "auto",
+    random_state: int = 42,
+):
+    """
+    Generator yielding per-fold augmented arrays.
+
+    Yields
+    ------
+    fold_i, X_train, y_train, X_val, y_val, meta_train, meta_val
+
+    Augmentation happens INSIDE each fold (M2 leakage fix carried into k-fold).
+    Asserts no fight_id leakage within each fold.
+    """
+    folds, strategy_used = kfold_indices(raw, n_splits, strategy, random_state)
+    logger.info("k-fold strategy=%s  n_splits=%d", strategy_used, len(folds))
+
+    for fold_i, (train_idx, val_idx) in enumerate(folds, start=1):
+        raw_tr = _select_raw(raw, train_idx)
+        raw_va = _select_raw(raw, val_idx)
+
+        X_tr, y_tr, m_tr = augment_pair(raw_tr)
+        X_va, y_va, m_va = augment_pair(raw_va)
+
+        # Per-fold leakage check (M2 step 5 applied to CV).
+        train_ids = set(m_tr["fight_id"].tolist())
+        val_ids   = set(m_va["fight_id"].tolist())
+        leak = train_ids & val_ids
+        assert not leak, f"Fold {fold_i}: {len(leak)} fight_ids leaked across train/val"
+
+        yield fold_i, X_tr, y_tr, X_va, y_va, m_tr, m_va
+
+
+def cv_score_sklearn(
+    estimator_factory,
+    raw: dict,
+    n_splits: int = 5,
+    strategy: str = "auto",
+    random_state: int = 42,
+    metrics: tuple = ("f1", "accuracy", "roc_auc"),
+) -> dict:
+    """
+    Run k-fold CV with a fresh sklearn estimator per fold.
+
+    Fits a StandardScaler on each fold's train portion only (no leakage).
+    Reports mean ± std across folds (M3 step 4).
+
+    Parameters
+    ----------
+    estimator_factory : callable() -> sklearn estimator. Called once per fold
+                        so each fold gets a fresh model.
+    raw               : raw dict (typically raw_train from temporal_split_raw).
+    metrics           : subset of {"f1", "accuracy", "roc_auc"}.
+
+    Returns
+    -------
+    dict mapping each metric name to {"mean": float, "std": float, "folds": list[float]}
+    plus "_strategy" key recording which splitter was used.
+    """
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.metrics import f1_score, accuracy_score, roc_auc_score
+
+    metric_fns = {
+        "f1":       lambda y, p, _: f1_score(y, p, zero_division=0),
+        "accuracy": lambda y, p, _: accuracy_score(y, p),
+        "roc_auc":  lambda y, _, proba: roc_auc_score(y, proba) if proba is not None else float("nan"),
+    }
+
+    results: dict[str, list[float]] = {m: [] for m in metrics}
+    strategy_used = None
+
+    folds, strategy_used = kfold_indices(raw, n_splits, strategy, random_state)
+    logger.info("CV strategy=%s  n_splits=%d", strategy_used, len(folds))
+
+    for fold_i, (train_idx, val_idx) in enumerate(folds, start=1):
+        raw_tr = _select_raw(raw, train_idx)
+        raw_va = _select_raw(raw, val_idx)
+
+        X_tr, y_tr, m_tr = augment_pair(raw_tr)
+        X_va, y_va, m_va = augment_pair(raw_va)
+
+        leak = set(m_tr["fight_id"].tolist()) & set(m_va["fight_id"].tolist())
+        assert not leak, f"Fold {fold_i}: {len(leak)} fight_ids leaked across train/val"
+
+        # Scaler fit on train only (doc reminder).
+        scaler = StandardScaler().fit(X_tr)
+        X_tr_s = scaler.transform(X_tr)
+        X_va_s = scaler.transform(X_va)
+
+        clf = estimator_factory()
+        clf.fit(X_tr_s, y_tr)
+        y_pred = clf.predict(X_va_s)
+        y_proba = (
+            clf.predict_proba(X_va_s)[:, 1]
+            if hasattr(clf, "predict_proba") else None
+        )
+
+        for m in metrics:
+            results[m].append(float(metric_fns[m](y_va, y_pred, y_proba)))
+
+    summary: dict = {"_strategy": strategy_used, "_n_splits": len(folds)}
+    for m, scores in results.items():
+        if scores:
+            summary[m] = {
+                "mean":  float(np.mean(scores)),
+                "std":   float(np.std(scores)),
+                "folds": scores,
+            }
+    return summary
+
+
+def format_cv_report(summary: dict, model_name: str = "model") -> str:
+    """Format a cv_score_sklearn summary for logs / slides."""
+    lines = [
+        f"\n── CV report: {model_name}  "
+        f"(strategy={summary['_strategy']}, k={summary['_n_splits']}) ──",
+    ]
+    for m, stats in summary.items():
+        if m.startswith("_"):
+            continue
+        folds_str = ", ".join(f"{s:.3f}" for s in stats["folds"])
+        lines.append(
+            f"  {m:<10s}  {stats['mean']:.3f} ± {stats['std']:.3f}   "
+            f"folds=[{folds_str}]"
+        )
+    lines.append("")
+    return "\n".join(lines)
