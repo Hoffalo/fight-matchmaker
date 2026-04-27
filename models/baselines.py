@@ -49,7 +49,25 @@ STYLE_CLASH_INDICES = list(range(48, 56))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Placeholder data — REPLACE THIS with real data loading
+# Real data loading (requires populated DB with is_bonus_fight labels)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def load_real_data(db_path: str = "data/ufc_matchmaker.db", **kwargs) -> dict:
+    """
+    Load 72-dim feature vectors from the real UFC database.
+
+    Thin wrapper around models.data_loader.load_real_data() that provides
+    the canonical data loading path for this codebase.
+
+    Returns dict with: X_train, y_train, X_val, y_val, X_test, y_test,
+    scaler, feature_names, event_ids_test, summary.
+    """
+    from models.data_loader import load_real_data as _load
+    return _load(db_path=db_path, **kwargs)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Placeholder data (for development without a populated DB)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def load_placeholder_data(
@@ -60,15 +78,8 @@ def load_placeholder_data(
     """
     Generate synthetic data shaped like the real UFC dataset.
 
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │  *** REPLACE THIS FUNCTION with real data loading when ready. ***   │
-    │                                                                      │
-    │  Swap in a function that:                                            │
-    │    1. Queries the DB for historical fights with bonus labels          │
-    │    2. Builds 72-dim feature vectors via feature_engineering.py        │
-    │    3. Applies temporal split (pre-2023 / 2023 / 2024+)              │
-    │    4. Returns the same dict schema as below                          │
-    └──────────────────────────────────────────────────────────────────────┘
+    For real data, use load_real_data() instead — it reads from the DB
+    populated by the Wikipedia bonus scraper and applies temporal splitting.
 
     The synthetic data has a learnable signal: positive-class samples (bonus
     fights) have elevated values in features 48-55, which correspond to style
@@ -460,8 +471,17 @@ if __name__ == "__main__":
     )
     np.random.seed(RANDOM_STATE)
 
+    # Try real data; fall back to placeholder if DB not available
+    try:
+        data = load_real_data()
+        print("  [Using REAL data from DB]")
+    except (FileNotFoundError, ValueError) as e:
+        logger.warning("Real data unavailable (%s), using placeholder data.", e)
+        data = load_placeholder_data()
+        print("  [Using PLACEHOLDER data]")
+
     bc = BaselineComparison()
-    bc.load_data()
+    bc.load_data(data)
     bc.train_all()
 
     print("\n" + "=" * 90)

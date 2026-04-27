@@ -687,10 +687,18 @@ if __name__ == "__main__":
     fe = importlib.util.module_from_spec(spec_fe)
     spec_fe.loader.exec_module(fe)
 
-    # ── Train a quick XGBoost model on placeholder data ──────────────────
-    print("Training XGBoost on placeholder data for demo...")
+    # ── Train a quick XGBoost model ─────────────────────────────────────
+    try:
+        from models.data_loader import load_real_data
+        data = load_real_data()
+        print("  [Using REAL data from DB]")
+    except (FileNotFoundError, ValueError, ImportError):
+        data = baselines.load_placeholder_data()
+        print("  [Using PLACEHOLDER data — DB not available]")
+
+    print("Training XGBoost for demo...")
     bc = baselines.BaselineComparison()
-    bc.load_data()
+    bc.load_data(data)
     bc.train_all()
     _, xgb_model = bc.get_best_model()
 
