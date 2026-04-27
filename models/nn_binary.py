@@ -475,7 +475,12 @@ def _sigmoid_np(x: np.ndarray) -> np.ndarray:
 
 
 def _generate_placeholder_data() -> dict:
-    """72-dim synthetic data with learnable signal for testing."""
+    """
+    72-dim synthetic data with learnable signal for testing.
+
+    For real data, use models.data_loader.load_real_data() which queries
+    the populated DB and applies proper temporal splitting + augmentation.
+    """
     np.random.seed(RANDOM_STATE)
 
     n_samples = 4000
@@ -492,9 +497,7 @@ def _generate_placeholder_data() -> dict:
     pos_idx = np.random.choice(n_samples, size=n_pos, replace=False)
     y[pos_idx] = 1.0
 
-    # Signal in cross-features 48-55 (style clash / action density)
     X[pos_idx, 48:56] += 1.2 + np.random.randn(n_pos, 8) * 0.3
-    # Weaker secondary signal
     for col in [62, 63, 64, 69, 71]:
         X[pos_idx, col] += 0.6 + np.random.randn(n_pos) * 0.2
 
@@ -509,6 +512,18 @@ def _generate_placeholder_data() -> dict:
     }
 
 
+def _load_data() -> dict:
+    """Try real data first; fall back to synthetic placeholder."""
+    try:
+        from models.data_loader import load_real_data
+        data = load_real_data()
+        logger.info("Using REAL data from DB")
+        return data
+    except (FileNotFoundError, ValueError, ImportError) as e:
+        logger.warning("Real data unavailable (%s), using placeholder.", e)
+        return _generate_placeholder_data()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI entry point
 # ─────────────────────────────────────────────────────────────────────────────
@@ -521,7 +536,7 @@ if __name__ == "__main__":
     torch.manual_seed(RANDOM_STATE)
     np.random.seed(RANDOM_STATE)
 
-    data = _generate_placeholder_data()
+    data = _load_data()
 
     # ── 1. Single training run with default config ───────────────────────
     print("\n=== Single training run (default config) ===")

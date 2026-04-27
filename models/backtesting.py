@@ -20,7 +20,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from data.db import Database
-from models.feature_engineering import build_matchup_vector
+from models.feature_engineering import build_matchup_vector, build_full_matchup_vector
 from config import BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -37,10 +37,22 @@ def _load_fighters(db: Database) -> dict[int, dict]:
         return {row["id"]: dict(row) for row in conn.execute("SELECT * FROM fighters")}
 
 
-def _build_event_fights(db: Database, fighters: dict[int, dict]) -> list[dict]:
+def _build_event_fights(
+    db: Database,
+    fighters: dict[int, dict],
+    use_72_dim: bool = False,
+) -> list[dict]:
     """
     Return every usable fight as a dict with feature vector + metadata.
+
+    Parameters
+    ----------
+    use_72_dim : if True, uses build_full_matchup_vector (72 features)
+                 for compatibility with the binary classifier pipeline.
+                 Defaults to False (48-dim) for backward compatibility.
     """
+    vector_fn = build_full_matchup_vector if use_72_dim else build_matchup_vector
+
     with db.connect() as conn:
         rows = conn.execute(
             """SELECT f.id, f.fighter1_id, f.fighter2_id,
@@ -55,8 +67,7 @@ def _build_event_fights(db: Database, fighters: dict[int, dict]) -> list[dict]:
         f2 = fighters.get(r["fighter2_id"])
         if not (f1 and f2):
             continue
-        # Use the (A,B) ordering for inference; symmetry is a training-time concern
-        vec = build_matchup_vector(f1, f2)
+        vec = vector_fn(f1, f2)
         out.append({
             "fight_id":   r["id"],
             "event_id":   r["event_id"],
@@ -111,16 +122,28 @@ def backtest(
     test_date_from: str = "2026-01-01",
     k: int = 3,
     random_state: int = 42,
+    model=None,
+    scaler: StandardScaler | None = None,
+    use_72_dim: bool = False,
 ) -> dict:
     """
     Time-respecting backtest: train on everything strictly before
     `test_date_from`, evaluate per-event on everything from that date onward.
 
+    Parameters
+    ----------
+    model  : pre-trained sklearn-like classifier with predict_proba().
+             If None, falls back to the built-in LogReg baseline.
+    scaler : fitted StandardScaler for the model. If None and model is None,
+             a scaler is fitted on the training split automatically.
+    use_72_dim : use 72-dim feature vectors (for binary classifier pipeline
+                 models from baselines.py / nn_binary.py).
+
     Returns summary dict and writes outputs/backtest_results.{csv,md}.
     """
     OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
     fighters = _load_fighters(db)
-    all_rows = _build_event_fights(db, fighters)
+    all_rows = _build_event_fights(db, fighters, use_72_dim=use_72_dim)
 
     train_rows = [r for r in all_rows if r["event_date"] < test_date_from]
     test_rows  = [r for r in all_rows if r["event_date"] >= test_date_from]
@@ -138,7 +161,13 @@ def backtest(
         len(train_rows), train_pos, len(test_rows), test_pos,
     )
 
-    clf, scaler = train_baseline_classifier(train_rows, random_state=random_state)
+    if model is not None:
+        clf = model
+        if scaler is None:
+            X_train = np.stack([r["X"] for r in train_rows])
+            scaler = StandardScaler().fit(X_train)
+    else:
+        clf, scaler = train_baseline_classifier(train_rows, random_state=random_state)
 
     # Group test rows by event
     by_event: dict[int, list[dict]] = {}
@@ -217,7 +246,8 @@ def backtest(
 
     # ── Persist Markdown table ─────────────────────────────────────────────
     with open(BACKTEST_MD, "w", encoding="utf-8") as fh:
-        fh.write(f"# Backtest results — top-{k} per event (LogReg baseline)\n\n")
+        model_name = type(clf).__name__
+        fh.write(f"# Backtest results — top-{k} per event ({model_name})\n\n")
         fh.write(
             f"- Train cutoff: events before **{test_date_from}**\n"
             f"- Train size: **{len(train_rows)}** fights ({train_pos} positive, "

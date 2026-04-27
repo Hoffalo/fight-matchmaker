@@ -33,6 +33,7 @@ from sklearn.preprocessing import StandardScaler
 
 from data.db import Database
 from models.data_splits import build_raw_pairs, augment_pair, temporal_split
+from models.feature_engineering import build_full_matchup_vector
 from models.fight_quality_nn import FightQualityNN
 from config import NN
 
@@ -83,6 +84,88 @@ def build_classification_dataset(
     logger.info(
         "Augmented dataset: %d rows (%d fights × 2), %d features, positives=%d (%.1f%%)",
         len(X), len(raw["f1"]), X.shape[1], pos, 100.0 * pos / max(len(y), 1),
+    )
+    return X, y, meta
+
+
+def build_classification_dataset_72(
+    db: Database,
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """
+    Same as build_classification_dataset but produces 72-dim feature vectors
+    (24 fighter A + 24 fighter B + 24 matchup cross-features) using
+    build_full_matchup_vector().
+
+    Used by the binary classifier pipeline (baselines.py, nn_binary.py)
+    where the cross-features are the strongest entertainment predictors.
+    """
+    logger.info("Building 72-dim classification dataset from DB...")
+
+    with db.connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT
+                f.id            AS fight_id,
+                f.fighter1_id,
+                f.fighter2_id,
+                f.is_bonus_fight,
+                e.date          AS event_date
+            FROM fights f
+            LEFT JOIN events e ON f.event_id = e.id
+            WHERE f.fighter1_id IS NOT NULL
+              AND f.fighter2_id IS NOT NULL
+            ORDER BY e.date ASC
+            """
+        ).fetchall()
+
+    rows = [dict(r) for r in rows]
+    logger.info("Found %d candidate fights in DB", len(rows))
+    if not rows:
+        raise ValueError(
+            "No fights with both fighter IDs found in DB. "
+            "Run the data pipeline first: python main.py collect"
+        )
+
+    fighters_cache: dict[int, dict] = {}
+    with db.connect() as conn:
+        for row in conn.execute("SELECT * FROM fighters").fetchall():
+            fighters_cache[row["id"]] = dict(row)
+
+    X_rows: list[np.ndarray] = []
+    y_rows: list[float] = []
+    fight_ids: list[int] = []
+    dates: list[str] = []
+
+    skipped = 0
+    for fight in rows:
+        f1 = fighters_cache.get(fight["fighter1_id"])
+        f2 = fighters_cache.get(fight["fighter2_id"])
+        if f1 is None or f2 is None:
+            skipped += 1
+            continue
+
+        label = float(fight["is_bonus_fight"] or 0)
+        vec_ab = build_full_matchup_vector(f1, f2)
+        vec_ba = build_full_matchup_vector(f2, f1)
+
+        for vec in (vec_ab, vec_ba):
+            X_rows.append(vec)
+            y_rows.append(label)
+            fight_ids.append(fight["fight_id"])
+            dates.append(fight["event_date"] or "")
+
+    X = np.array(X_rows, dtype=np.float32)
+    y = np.array(y_rows, dtype=np.float32)
+    meta = {
+        "fight_id": np.array(fight_ids, dtype=np.int64),
+        "event_date": np.array(dates),
+    }
+
+    pos = int(y.sum())
+    logger.info(
+        "Dataset ready (72-dim): %d samples, %d features, positive class = %d (%.1f%%); "
+        "skipped %d fights with missing profiles",
+        len(X), X.shape[1], pos, 100.0 * pos / max(len(y), 1), skipped,
     )
     return X, y, meta
 

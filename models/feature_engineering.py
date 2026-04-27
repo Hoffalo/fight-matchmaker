@@ -90,7 +90,7 @@ ALL_FEATURE_NAMES = (
     [f"f1_{n}" for n in FIGHTER_FEATURE_NAMES]
     + [f"f2_{n}" for n in FIGHTER_FEATURE_NAMES]
     + MATCHUP_FEATURE_NAMES
-)  # Total: 48 + 24... actually we keep it at 48 for the NN input_dim in config
+)  # Total: 72 (24 fighter A + 24 fighter B + 24 matchup cross-features)
 
 
 def extract_fighter_features(fighter: dict) -> np.ndarray:
@@ -248,13 +248,28 @@ def extract_matchup_features(fighter_a: dict, fighter_b: dict) -> np.ndarray:
 
 def build_matchup_vector(fighter_a: dict, fighter_b: dict) -> np.ndarray:
     """
-    Build the full 48-dim input vector for the NN.
+    Build a 48-dim input vector for the legacy regression NN.
     = fighter_a features (24) + fighter_b features (24).
-    Matchup features are embedded within fighter features via the cross products.
+
+    For the 72-dim binary classifier pipeline, use build_full_matchup_vector().
     """
     fa = extract_fighter_features(fighter_a)
     fb = extract_fighter_features(fighter_b)
     return np.concatenate([fa, fb])
+
+
+def build_full_matchup_vector(fighter_a: dict, fighter_b: dict) -> np.ndarray:
+    """
+    Build the full 72-dim input vector for the binary classification pipeline.
+    = fighter_a features (24) + fighter_b features (24) + matchup cross-features (24).
+
+    The cross-features capture matchup dynamics (style clash, offense-vs-defense,
+    competitive balance) that are the strongest predictors of entertaining fights.
+    """
+    fa = extract_fighter_features(fighter_a)
+    fb = extract_fighter_features(fighter_b)
+    cross = extract_matchup_features(fighter_a, fighter_b)
+    return np.concatenate([fa, fb, cross])
 
 
 def compute_fight_quality_score(fight: dict, db) -> Optional[float]:
