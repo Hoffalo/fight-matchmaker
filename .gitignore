@@ -23,3 +23,23 @@ Thumbs.db
 .vscode/
 .idea/
 .env
+.env.*
+
+# Secrets — cloud service-account / API key files
+# (specific known leaks first, broader patterns after)
+automacao-clickup-*.json
+*service-account*.json
+*service_account*.json
+*credentials*.json
+*-credentials.json
+gcp-key*.json
+google-key*.json
+*.pem
+*.p12
+*.pfx
+*.key
+secrets/
+**/secrets.*
+
+# Claude Code local settings (machine-specific, can contain local paths)
+.claude/settings.local.json
