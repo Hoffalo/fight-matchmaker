@@ -15,7 +15,7 @@ Commands
   card      — Build a suggested full event card
   stats     — Show current database record counts
   evaluate  — Evaluate trained NN on stored regression targets
-  pca       — PCA variance breakdown on scaled 72-dim training features
+  pca       — PCA variance breakdown on scaled 115-dim training features
   seed-db   — Create minimal SQLite DB for offline PCA/tests (no scraping)
   demo      — Run with synthetic demo data (no scraping needed)
 ═══════════════════════════════════════════════════════════════════════════════
@@ -478,7 +478,7 @@ def seed_db(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# pca — dimensionality analysis (scaled 72-dim features)
+# pca — dimensionality analysis (scaled 115-dim features)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.command()
@@ -493,7 +493,7 @@ def pca(
     [bold]PCA on training features[/bold] — cumulative variance and PC1 loadings.
 
     Requires the canonical database used for modelling. Useful for assessing
-    redundancy across the 72 engineered dimensions.
+    redundancy across the 115 engineered dimensions.
     """
     from models.pca_analysis import format_pca_report, run_pca_from_db
 

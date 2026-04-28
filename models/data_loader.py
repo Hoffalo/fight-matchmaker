@@ -13,11 +13,11 @@ Usage
 -----
     from models.data_loader import load_real_data, get_canonical_splits
 
-    # Full pipeline (query DB → split → augment → scale):
+    # Default: RFECV subset from ``pipeline_config`` when set (e.g. 12-D):
     data = load_real_data()
 
-    # Or just get splits without scaling (for custom preprocessing):
-    splits = get_canonical_splits()
+    # Full 115-D scaled matrix (PCA / full-feat baselines); scaler fit on train only:
+    data_full = get_canonical_splits(subset_features=False)
 """
 import logging
 from pathlib import Path
@@ -51,6 +51,7 @@ def get_canonical_splits(
     train_cutoff: str = TRAIN_CUTOFF,
     val_cutoff: str = VAL_CUTOFF,
     selected_features: list[str] | None = None,
+    subset_features: bool = True,
 ) -> dict:
     """
     Canonical split pipeline using data_splits.py infrastructure + 115-dim features.
@@ -66,9 +67,14 @@ def get_canonical_splits(
 
     Parameters
     ----------
+    subset_features : bool, default True
+        If True, may reduce columns using ``selected_features`` or
+        ``pipeline_config.SELECTED_FEATURES`` (RFECV subset). If False, always keep
+        all ``FEATURE_DIM`` (115) columns — use for PCA / full-feat baselines.
     selected_features : optional list of feature names (subset of ``ALL_FEATURE_NAMES``).
-        If ``None``, uses non-empty ``models.pipeline_config.SELECTED_FEATURES``;
-        if that is also unset/empty, all ``FEATURE_DIM`` columns are kept.
+        If ``None``, uses non-empty ``models.pipeline_config.SELECTED_FEATURES`` when
+        ``subset_features`` is True; if that is also unset/empty, all columns are kept.
+        Ignored when ``subset_features`` is False (full vector).
 
     Returns
     -------
@@ -100,16 +106,24 @@ def get_canonical_splits(
 
     db = Database(db_path_resolved)
 
-    if selected_features is not None and len(selected_features) > 0:
-        effective_sel: list[str] | None = list(selected_features)
-    else:
-        try:
-            from models.pipeline_config import SELECTED_FEATURES as _pc_sel
-            effective_sel = (
-                list(_pc_sel) if _pc_sel is not None and len(_pc_sel) > 0 else None
-            )
-        except ImportError:
-            effective_sel = None
+    effective_sel: list[str] | None = None
+    if subset_features:
+        if selected_features is not None and len(selected_features) > 0:
+            effective_sel = list(selected_features)
+        else:
+            try:
+                from models.pipeline_config import SELECTED_FEATURES as _pc_sel
+                effective_sel = (
+                    list(_pc_sel) if _pc_sel is not None and len(_pc_sel) > 0 else None
+                )
+            except ImportError:
+                effective_sel = None
+    elif selected_features is not None and len(selected_features) > 0:
+        logger.warning(
+            "subset_features=False: ignoring selected_features=%s (using all %d columns)",
+            selected_features[:5],
+            FEATURE_DIM,
+        )
 
     # ── 1. Load raw pairs (one row per fight, no vectors yet) ────────────
     raw = build_raw_pairs(db)
@@ -224,6 +238,7 @@ def load_real_data(
     train_cutoff: str = TRAIN_CUTOFF,
     val_cutoff: str = VAL_CUTOFF,
     selected_features: list[str] | None = None,
+    subset_features: bool = True,
 ) -> dict:
     """
     Load fight data from SQLite — delegates to get_canonical_splits().
@@ -235,6 +250,7 @@ def load_real_data(
         train_cutoff=train_cutoff,
         val_cutoff=val_cutoff,
         selected_features=selected_features,
+        subset_features=subset_features,
     )
 
 
@@ -273,7 +289,11 @@ def _print_summary(summary: dict) -> None:
 
     output = "\n".join(lines)
     print(output)
-    logger.info(output)
+    logger.info(
+        "Data summary: %d fights, feature_dim=%d",
+        summary["total_unique_fights"],
+        summary["feature_dim"],
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

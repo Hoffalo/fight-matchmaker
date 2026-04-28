@@ -1,5 +1,5 @@
 """
-PCA dimensionality analysis for the 72-dim matchup feature space.
+PCA dimensionality analysis for the matchup feature space (full scaled vector).
 
 Uses the same scaled training matrix as classifiers (StandardScaler fit on train).
 Reports cumulative explained variance and PC1 loadings — useful for redundancy checks.
@@ -28,8 +28,9 @@ def run_pca_analysis(
 
     Parameters
     ----------
-    X_train : (N, 72) float array
-    feature_names : optional 72 names for PC1 loading report
+    X_train : (N, D) float array
+        Typically D=115 after ``build_full_matchup_vector`` + scaling.
+    feature_names : optional D names for PC1 loading report
     max_components : defaults to min(n_samples, n_features)
     """
     X = np.nan_to_num(np.asarray(X_train, dtype=np.float64), nan=0.0)
@@ -82,7 +83,7 @@ def format_pca_report(result: dict) -> str:
     lines = [
         "",
         "=" * 72,
-        "  PCA — cumulative variance (scaled 72-dim train features)",
+        "  PCA — cumulative variance (scaled train features)",
         "=" * 72,
         f"  Samples: {result['n_samples']}   Features: {result['n_features']}",
         f"  PCs fitted: {result['n_components_fitted']}",
@@ -128,7 +129,7 @@ def run_pca_from_db(db_path: str = "data/ufc_matchmaker.db") -> dict:
     if not path.exists():
         raise FileNotFoundError(f"Database not found: {path}")
 
-    splits = get_canonical_splits(db_path=str(path))
+    splits = get_canonical_splits(db_path=str(path), subset_features=False)
     X_train = splits["X_train"]
     names = splits.get("feature_names") or []
 
