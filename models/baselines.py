@@ -5,10 +5,13 @@ Baseline classification models for UFC fight entertainment prediction.
 Target: is_bonus_fight (binary) — 1 if the fight earned a UFC bonus award
         (Fight of the Night / Performance of the Night), 0 otherwise.
 
-Feature vector: 72 floats per fight
+Feature vector: 115 floats per fight
     [0:24]   Fighter A stats (physical, career, offense, defense, style, activity)
     [24:48]  Fighter B stats (same schema)
     [48:72]  Matchup cross-features (style clash, offense-vs-defense, competitive balance)
+    [72:77]  Odds features (closeness, gap, close-line flag, overround, has-odds)
+    [77:81]  Fight context (title, main event, five-rounder, weight-class finish proxy)
+    [81:115] Rolling fight_stats + matchup rolling cross-features
 
 Evaluation covers both classification quality and ranking quality, because at
 inference time the matchmaker scores ALL possible pairings and ranks them — so
@@ -38,10 +41,12 @@ from sklearn.model_selection import RandomizedSearchCV, TimeSeriesSplit
 from sklearn.preprocessing import StandardScaler
 from xgboost import XGBClassifier
 
+from config import FEATURE_DIM, SCALE_POS_WEIGHT
+
 logger = logging.getLogger(__name__)
 
 RANDOM_STATE = 42
-N_FEATURES = 72
+N_FEATURES = FEATURE_DIM
 
 # Features 48-55 map to style_clash_score, striker_vs_grappler, finisher_clash,
 # ko_power_clash, sub_threat_clash, strike_off_vs_def, td_off_vs_def, sub_off_vs_def
@@ -55,7 +60,7 @@ STYLE_CLASH_INDICES = list(range(48, 56))
 
 def load_real_data(db_path: str = "data/ufc_matchmaker.db", **kwargs) -> dict:
     """
-    Load 72-dim feature vectors from the real UFC database.
+    Load 115-dim feature vectors from the real UFC database.
 
     Thin wrapper around models.data_loader.load_real_data() that provides
     the canonical data loading path for this codebase.
@@ -129,7 +134,22 @@ def load_placeholder_data(
             0.6 + np.random.randn(len(secondary_indices)) * 0.2
         )
 
-    # Temporal split — NOT random, preserving temporal ordering
+    # Odds features (indices 72-76): close lines correlate with bonus fights
+    for idx in positive_indices:
+        X_all[idx, 72] += 0.8 + np.random.randn() * 0.2   # odds_closeness
+        X_all[idx, 74] += 0.5                                # is_close_line
+
+    # Context (77-80): title / main event / five rounds / finish-heavy division
+    for idx in positive_indices:
+        X_all[idx, 77] += 0.35
+        X_all[idx, 78] += 0.3
+        X_all[idx, 79] += 0.2
+        X_all[idx, 80] += 0.1
+
+    if N_FEATURES > 81:
+        roll_cols = N_FEATURES - 81
+        for idx in positive_indices:
+            X_all[idx, 81:N_FEATURES] += 0.25 + np.random.randn(roll_cols) * 0.08
     X_train = X_all[:n_train]
     y_train = y_all[:n_train]
     X_val = X_all[n_train : n_train + n_val]
@@ -321,10 +341,8 @@ class BaselineComparison:
         )
 
     def _build_xgboost(self) -> XGBClassifier:
-        n_neg = int((self._data["y_train"] == 0).sum())
-        n_pos = int((self._data["y_train"] == 1).sum())
         return XGBClassifier(
-            scale_pos_weight=n_neg / max(n_pos, 1),
+            scale_pos_weight=SCALE_POS_WEIGHT,
             random_state=RANDOM_STATE,
             eval_metric="logloss",
             verbosity=0,

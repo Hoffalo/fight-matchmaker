@@ -10,7 +10,7 @@ fighter pairing in a weight class, then ranks by probability.  The model
 therefore needs well-calibrated probabilities and strong ranking ability.
 
 Architecture changes from the original regression NN:
-  - Input dim: 72 (was 48 — matchup cross-features now included)
+  - Input dim: 115 (24+24+24 cross + 5 odds + 4 context + 15+15 rolling + 4 rolling matchup)
   - Output: raw logit (no sigmoid); BCEWithLogitsLoss handles the numerics
   - BatchNorm between layers (was LayerNorm)
   - GELU activation (kept)
@@ -32,6 +32,8 @@ from sklearn.metrics import f1_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
 
+from config import FEATURE_DIM
+
 logger = logging.getLogger(__name__)
 
 RANDOM_STATE = 42
@@ -44,7 +46,7 @@ CHECKPOINT_DIR = Path(__file__).parent / "checkpoints"
 
 @dataclass
 class BinaryNNConfig:
-    input_dim: int = 72
+    input_dim: int = FEATURE_DIM
     hidden_dims: tuple[int, ...] = (128, 64, 32)
     dropout: float = 0.3
     learning_rate: float = 1e-3
@@ -65,13 +67,13 @@ class FightBonusNN(nn.Module):
     """
     MLP binary classifier for fight entertainment prediction.
 
-    Input:  72-dim matchup vector (24 fighter A + 24 fighter B + 24 cross-features)
+    Input:  FEATURE_DIM-dim matchup vector (career + cross + odds + context + rolling)
     Output: 1 raw logit (apply sigmoid externally for probability)
     """
 
     def __init__(
         self,
-        input_dim: int = 72,
+        input_dim: int = FEATURE_DIM,
         hidden_dims: tuple[int, ...] = (128, 64, 32),
         dropout: float = 0.3,
     ) -> None:
@@ -108,7 +110,7 @@ class FightBonusNN(nn.Module):
         """
         Parameters
         ----------
-        x : (batch, 72) float tensor
+        x : (batch, FEATURE_DIM) float tensor
 
         Returns
         -------
@@ -147,7 +149,7 @@ def train_binary_nn(
     if config is None:
         config = BinaryNNConfig()
 
-    torch.manual_seed(RANDOM_STATE)
+    config.input_dim = int(X_train.shape[1])
     np.random.seed(RANDOM_STATE)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -422,7 +424,7 @@ def predict_proba(
     Parameters
     ----------
     model  : trained FightBonusNN
-    X      : (N, 72) feature array (raw or pre-scaled)
+    X      : (N, FEATURE_DIM) feature array (raw or pre-scaled)
     scaler : if provided, applies transform before inference
 
     Returns
@@ -476,7 +478,7 @@ def _sigmoid_np(x: np.ndarray) -> np.ndarray:
 
 def _generate_placeholder_data() -> dict:
     """
-    72-dim synthetic data with learnable signal for testing.
+    Synthetic data (FEATURE_DIM) with learnable signal for testing.
 
     For real data, use models.data_loader.load_real_data() which queries
     the populated DB and applies proper temporal splitting + augmentation.
@@ -485,7 +487,7 @@ def _generate_placeholder_data() -> dict:
 
     n_samples = 4000
     positive_rate = 0.12
-    n_features = 72
+    n_features = FEATURE_DIM
 
     n_train = int(n_samples * 0.70)
     n_val = int(n_samples * 0.15)
@@ -500,6 +502,16 @@ def _generate_placeholder_data() -> dict:
     X[pos_idx, 48:56] += 1.2 + np.random.randn(n_pos, 8) * 0.3
     for col in [62, 63, 64, 69, 71]:
         X[pos_idx, col] += 0.6 + np.random.randn(n_pos) * 0.2
+    # Odds features (indices 72-76): close lines correlate with bonus fights
+    X[pos_idx, 72] += 0.8 + np.random.randn(n_pos) * 0.2  # odds_closeness
+    X[pos_idx, 74] += 0.5  # is_close_line
+    # Context (77-80): marquee / main-event / five-round / finish-heavy divisions
+    X[pos_idx, 77] += 0.4
+    X[pos_idx, 78] += 0.35
+    X[pos_idx, 79] += 0.25
+    X[pos_idx, 80] += 0.15
+    if n_features > 81:
+        X[pos_idx, 81:n_features] += 0.25 + np.random.randn(n_pos, n_features - 81) * 0.08
 
     scaler = StandardScaler().fit(X[:n_train])
     X = scaler.transform(X).astype(np.float32)

@@ -6,9 +6,9 @@ M1 — temporal split.
 M2 — leak-safe ordering: split raw fights by date FIRST, then augment
      (A, B) / (B, A) within each split so both orderings of a given fight
      can never land in different splits.
-M4 — 72-dim feature support: augment_pair accepts a vector_fn parameter
-     to use build_full_matchup_vector (72-dim with cross-features) instead
-     of the legacy 48-dim build_matchup_vector.
+M4 — 115-dim feature support: augment_pair accepts a vector_fn parameter
+     to use build_full_matchup_vector (115-dim: cross-features + odds + context + rolling)
+     instead of the legacy 48-dim build_matchup_vector.
 
 Actual database date ranges (corrected from the original plan doc):
   train : Jan 2025 – Aug 2025   (event_date < val_cutoff)
@@ -21,7 +21,7 @@ Usage
     from models.data_splits import build_raw_pairs, temporal_split
 
     raw = build_raw_pairs(Database())
-    # 72-dim (default — includes matchup cross-features):
+    # 115-dim (default — includes rolling fight_stats features):
     X_tr, y_tr, X_va, y_va, X_te, y_te, m_tr, m_va, m_te = temporal_split(raw)
     # 48-dim (legacy regression model):
     X_tr, y_tr, ... = temporal_split(raw, use_72_dim=False)
@@ -32,6 +32,8 @@ import os as _os
 import sys as _sys
 
 import numpy as np
+
+from config import FEATURE_DIM
 
 logger = logging.getLogger(__name__)
 
@@ -61,17 +63,34 @@ _fe = _load_sibling("feature_engineering")
 build_matchup_vector = _fe.build_matchup_vector
 build_full_matchup_vector = _fe.build_full_matchup_vector
 
-DEFAULT_VECTOR_FN = build_full_matchup_vector  # 72-dim (active pipeline)
+DEFAULT_VECTOR_FN = build_full_matchup_vector  # 115-dim (active pipeline)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Raw pair loader  (one row per fight — no augmentation)
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _parse_odds(raw) -> float | None:
+    """Coerce a DB odds value to float, or None if absent/unparseable."""
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+        return v if v != 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def build_raw_pairs(db) -> dict:
     """
     Load one row per fight from the DB. No (A, B) / (B, A) augmentation here —
     that happens AFTER splitting (see temporal_split).
+
+    Odds and fight context (title/main event/rounds/weight class) from the
+    fights table are injected into per-fight copies of the fighter dicts as
+    ``_fight_odds`` and ``_fight_context`` for ``build_full_matchup_vector``.
+    Per-corner leak-safe rolling vectors from ``fight_stats`` are attached as
+    ``_rolling_vec``.
 
     Returns
     -------
@@ -82,6 +101,8 @@ def build_raw_pairs(db) -> dict:
       fight_id   : int64 array (M,)  — DB primary key (M2 step 1)
       event_date : np.ndarray of ISO strings (M,)
     """
+    from models.rolling_features import attach_rolling_to_fighter_dicts
+
     with db.connect() as conn:
         rows = [dict(r) for r in conn.execute(
             """
@@ -89,6 +110,11 @@ def build_raw_pairs(db) -> dict:
                    f.fighter1_id,
                    f.fighter2_id,
                    f.is_bonus_fight,
+                   f.fighter1_odds,
+                   f.fighter2_odds,
+                   f.is_title_fight,
+                   f.is_main_event,
+                   f.weight_class,
                    e.date         AS event_date
             FROM fights f
             LEFT JOIN events e ON f.event_id = e.id
@@ -100,7 +126,7 @@ def build_raw_pairs(db) -> dict:
             "SELECT * FROM fighters"
         ).fetchall()}
 
-    f1_list, f2_list, y_list, fid_list, date_list = [], [], [], [], []
+    candidates: list[tuple[dict, dict, dict]] = []
     skipped = 0
     for fight in rows:
         f1 = fighters.get(fight["fighter1_id"])
@@ -108,8 +134,49 @@ def build_raw_pairs(db) -> dict:
         if f1 is None or f2 is None:
             skipped += 1
             continue
-        f1_list.append(f1)
-        f2_list.append(f2)
+        candidates.append((fight, f1, f2))
+
+    fight_rows = [
+        {
+            "fight_id": c[0]["fight_id"],
+            "fighter1_id": c[0]["fighter1_id"],
+            "fighter2_id": c[0]["fighter2_id"],
+            "event_date": c[0]["event_date"] or "",
+        }
+        for c in candidates
+    ]
+    roll_lookup = (
+        attach_rolling_to_fighter_dicts(str(db.path), fight_rows, fighters)
+        if fight_rows else {}
+    )
+
+    f1_list, f2_list, y_list, fid_list, date_list = [], [], [], [], []
+    for fight, f1, f2 in candidates:
+        odds1 = _parse_odds(fight.get("fighter1_odds"))
+        odds2 = _parse_odds(fight.get("fighter2_odds"))
+        is_t = bool(fight.get("is_title_fight"))
+        fight_ctx = {
+            "is_title_fight": int(is_t),
+            "is_main_event": int(bool(fight.get("is_main_event"))),
+            "scheduled_rounds": 5 if is_t else 3,
+            "weight_class": (fight.get("weight_class") or "").strip(),
+        }
+        k1 = (fight["fight_id"], fight["fighter1_id"])
+        k2 = (fight["fight_id"], fight["fighter2_id"])
+        rv1 = roll_lookup[k1]
+        rv2 = roll_lookup[k2]
+        f1_list.append({
+            **f1,
+            "_fight_odds": odds1,
+            "_fight_context": fight_ctx,
+            "_rolling_vec": rv1,
+        })
+        f2_list.append({
+            **f2,
+            "_fight_odds": odds2,
+            "_fight_context": fight_ctx,
+            "_rolling_vec": rv2,
+        })
         y_list.append(float(fight["is_bonus_fight"] or 0))
         fid_list.append(fight["fight_id"])
         date_list.append(fight["event_date"] or "")
@@ -138,15 +205,15 @@ def augment_pair(raw: dict, vector_fn=None) -> tuple[np.ndarray, np.ndarray, dic
     splitter that respects fight_id keeps them together.
 
     M2 step 2: both orderings share a fight_id.
-    M4: vector_fn controls feature dimension (72-dim default, 48-dim legacy).
-        Cross-features are recomputed for the (B,A) ordering because some
-        (reach_advantage, rankings_gap) are directional.
+    M4: vector_fn controls feature dimension (115-dim default, 48-dim legacy).
+        Cross-features, odds, context, and rolling stats are symmetric for (B,A) swap except
+        directional odds_gap; fight context is duplicated on both corners.
 
     Parameters
     ----------
     raw       : dict from build_raw_pairs() or _select_raw()
     vector_fn : callable(fighter_a_dict, fighter_b_dict) -> np.ndarray.
-                Defaults to build_full_matchup_vector (72-dim).
+                Defaults to build_full_matchup_vector (115-dim).
                 Pass build_matchup_vector for legacy 48-dim.
     """
     if vector_fn is None:
@@ -239,7 +306,7 @@ def temporal_split(
     raw         : output of build_raw_pairs()
     val_cutoff  : start of validation period
     test_cutoff : start of test period
-    use_72_dim  : True → 72-dim vectors (default, classification pipeline)
+    use_72_dim  : True → 115-dim vectors (default, classification pipeline)
                   False → 48-dim vectors (legacy regression model)
 
     Returns
@@ -480,7 +547,7 @@ def cv_score_sklearn(
                         so each fold gets a fresh model.
     raw               : raw dict (typically raw_train from temporal_split_raw).
     metrics           : subset of {"f1", "accuracy", "roc_auc"}.
-    use_72_dim        : True → 72-dim features (default), False → 48-dim legacy.
+    use_72_dim        : True → 115-dim features (default), False → 48-dim legacy.
 
     Returns
     -------
@@ -503,7 +570,7 @@ def cv_score_sklearn(
 
     folds, strategy_used = kfold_indices(raw, n_splits, strategy, random_state)
     logger.info("CV strategy=%s  n_splits=%d  feature_dim=%d",
-                strategy_used, len(folds), 72 if use_72_dim else 48)
+                strategy_used, len(folds), FEATURE_DIM if use_72_dim else 48)
 
     for fold_i, (train_idx, val_idx) in enumerate(folds, start=1):
         raw_tr = _select_raw(raw, train_idx)
@@ -533,7 +600,7 @@ def cv_score_sklearn(
     summary: dict = {
         "_strategy": strategy_used,
         "_n_splits": len(folds),
-        "_feature_dim": 72 if use_72_dim else 48,
+        "_feature_dim": FEATURE_DIM if use_72_dim else 48,
     }
     for m, scores in results.items():
         if scores:

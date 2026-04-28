@@ -2,10 +2,18 @@
 models/feature_engineering.py
 Feature extraction for the fight quality Neural Network.
 
-Two levels of features:
+Levels of features:
   1. Fighter features  — career stats, style, physical attributes (24 per fighter)
-  2. Matchup features  — cross-fighter signals, style clash, balance (24)
-  → Full input vector: 72 features (24 + 24 + 24) via build_full_matchup_vector()
+  2. Matchup features  — cross-fighter signals (24)
+  3. Odds features     — betting line signals (5)
+  4. Context features  — card/stakes/division (4): title, main event, rounds, weight-class finish proxy
+  5. Rolling features — leak-safe recent form / fight_stats aggregates (15 + 15 + 4 matchup)
+
+  → Total input vector: 115 features (81 base + 34 rolling)
+
+Card-position and title flags may partially capture selection bias: the UFC is
+more likely to award bonuses on marquee bouts. Compare models with and without
+context features to quantify the effect in evaluation write-ups.
 
 Fight Quality Score target is computed from historical fight outcomes.
 """
@@ -13,6 +21,14 @@ import logging
 import math
 import numpy as np
 from typing import Optional
+
+from models.rolling_features import (
+    ROLLING_DIM_FIGHTER,
+    ROLLING_FIGHTER_FEATURE_NAMES,
+    ROLLING_MATCHUP_FEATURE_NAMES,
+    _career_fallback_vec,
+    compute_rolling_matchup_features,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,11 +102,74 @@ MATCHUP_FEATURE_NAMES = [
     "form_clash",            # 23 |recent_form_A - recent_form_B| (momentum clash)
 ]
 
+# ── Odds Feature Schema (5 betting-line signals) ─────────────────────────────
+ODDS_FEATURE_NAMES = [
+    "odds_closeness",     # 0  1 - |prob_A - prob_B|; 1 = pick'em, 0 = huge mismatch
+    "odds_gap",           # 1  prob_A - prob_B (directional; positive = A is favorite)
+    "is_close_line",      # 2  Binary: both within ~±200 American odds (gap < 0.2)
+    "overround",          # 3  prob_A + prob_B; usually > 1 due to vig
+    "has_odds",           # 4  1.0 if real odds data exists, 0.0 if imputed
+]
+
+# Proxy for division-level finish rates (lighter divisions → more decisions on average).
+WEIGHT_CLASS_FINISH_TENDENCY = {
+    "Heavyweight": 0.9,
+    "Light Heavyweight": 0.75,
+    "Middleweight": 0.65,
+    "Welterweight": 0.55,
+    "Lightweight": 0.55,
+    "Featherweight": 0.55,
+    "Bantamweight": 0.5,
+    "Flyweight": 0.45,
+    "Women's Bantamweight": 0.45,
+    "Women's Flyweight": 0.4,
+    "Women's Strawweight": 0.4,
+}
+
+CONTEXT_FEATURE_NAMES = [
+    "is_title_fight",
+    "is_main_event",
+    "is_five_rounder",
+    "weight_class_finish_tendency",
+]
+
 ALL_FEATURE_NAMES = (
     [f"f1_{n}" for n in FIGHTER_FEATURE_NAMES]
     + [f"f2_{n}" for n in FIGHTER_FEATURE_NAMES]
     + MATCHUP_FEATURE_NAMES
-)  # Total: 72 (24 fighter A + 24 fighter B + 24 matchup cross-features)
+    + ODDS_FEATURE_NAMES
+    + CONTEXT_FEATURE_NAMES
+    + [f"f1_roll_{n}" for n in ROLLING_FIGHTER_FEATURE_NAMES]
+    + [f"f2_roll_{n}" for n in ROLLING_FIGHTER_FEATURE_NAMES]
+    + ROLLING_MATCHUP_FEATURE_NAMES
+)
+
+# First block of ALL_FEATURE_NAMES: 24 + 24 + 24 (no odds / context / rolling).
+CAREER_CROSS_DIM = len(FIGHTER_FEATURE_NAMES) * 2 + len(MATCHUP_FEATURE_NAMES)
+CAREER_CROSS_FEATURE_NAMES = (
+    [f"f1_{n}" for n in FIGHTER_FEATURE_NAMES]
+    + [f"f2_{n}" for n in FIGHTER_FEATURE_NAMES]
+    + list(MATCHUP_FEATURE_NAMES)
+)
+assert CAREER_CROSS_DIM == 72
+assert list(ALL_FEATURE_NAMES[:CAREER_CROSS_DIM]) == list(CAREER_CROSS_FEATURE_NAMES)
+
+
+def subset_full_feature_vector(
+    full_vec: np.ndarray,
+    keep: list[str] | None,
+    all_names: list[str] | None = None,
+) -> np.ndarray:
+    """
+    Reduce a vector built with ``build_full_matchup_vector`` to ``keep`` columns (order preserved).
+    ``keep`` must be a subset of ``all_names`` / ``ALL_FEATURE_NAMES``. None or empty → no-op.
+    """
+    v = np.asarray(full_vec, dtype=np.float32).ravel()
+    if not keep:
+        return v
+    names = list(all_names) if all_names is not None else list(ALL_FEATURE_NAMES)
+    idx = [names.index(n) for n in keep]
+    return v[idx]
 
 
 def extract_fighter_features(fighter: dict) -> np.ndarray:
@@ -138,9 +217,9 @@ def extract_fighter_features(fighter: dict) -> np.ndarray:
     loss_ko_rate  = (f.get("losses_ko")  or 0) / max(losses, 1)
     loss_sub_rate = (f.get("losses_sub") or 0) / max(losses, 1)
 
-    # Activity (TODO: can be computed from fight history later)
-    fight_frequency = min(total_fights / 15.0, 1.0)  # proxy
-    recent_form = win_pct  # placeholder until fight history is used
+    # Activity — slots 21–22 overwritten when `_rolling_vec` is attached (see below)
+    fight_frequency = min(total_fights / 15.0, 1.0)  # fallback if no rolling
+    recent_form = win_pct  # fallback if no rolling
     experience_score = min(math.log(total_fights + 1) / math.log(41), 1.0)
 
     vec = np.array([
@@ -153,7 +232,14 @@ def extract_fighter_features(fighter: dict) -> np.ndarray:
         fight_frequency, recent_form, experience_score,
     ], dtype=np.float32)
 
-    return np.clip(vec, 0.0, 1.0)
+    vec = np.clip(vec, 0.0, 1.0)
+    rv = f.get("_rolling_vec")
+    if rv is not None:
+        rv = np.asarray(rv, dtype=np.float32).ravel()
+        if rv.size >= ROLLING_DIM_FIGHTER:
+            vec[21] = 1.0 - float(rv[3])
+            vec[22] = float(np.clip(rv[0], 0.0, 1.0))
+    return vec
 
 
 def extract_matchup_features(fighter_a: dict, fighter_b: dict) -> np.ndarray:
@@ -246,30 +332,156 @@ def extract_matchup_features(fighter_a: dict, fighter_b: dict) -> np.ndarray:
     return np.clip(vec, 0.0, 1.0)
 
 
+def extract_odds_features(fighter_a_odds, fighter_b_odds) -> np.ndarray:
+    """
+    Extract 5 betting-line features from American odds.
+
+    Parameters
+    ----------
+    fighter_a_odds, fighter_b_odds : numeric American odds (e.g. -150, +130)
+        or None/0 when unavailable.
+
+    Returns 5-dim vector: [odds_closeness, odds_gap, is_close_line, overround, has_odds]
+    """
+    has_real_odds = (
+        fighter_a_odds is not None and fighter_b_odds is not None
+        and fighter_a_odds != 0 and fighter_b_odds != 0
+    )
+
+    prob_a = _american_to_prob(fighter_a_odds)
+    prob_b = _american_to_prob(fighter_b_odds)
+
+    odds_closeness = 1.0 - abs(prob_a - prob_b)
+    odds_gap = prob_a - prob_b
+    is_close_line = 1.0 if abs(prob_a - prob_b) < 0.2 else 0.0
+    overround = prob_a + prob_b
+    has_odds = 1.0 if has_real_odds else 0.0
+
+    return np.array(
+        [odds_closeness, odds_gap, is_close_line, overround, has_odds],
+        dtype=np.float32,
+    )
+
+
+def make_hypothetical_fight_context(
+    *,
+    is_title_fight: bool = False,
+    is_main_event: bool = False,
+    scheduled_rounds: int | None = None,
+    weight_class: str = "",
+) -> dict:
+    """
+    Build a fights-table-style dict for extract_context_features().
+
+    Used when scoring hypothetical matchups (no DB fight row). If
+    ``scheduled_rounds`` is omitted, uses 5 when ``is_title_fight`` else 3.
+    """
+    if scheduled_rounds is None:
+        scheduled_rounds = 5 if is_title_fight else 3
+    return {
+        "is_title_fight": int(bool(is_title_fight)),
+        "is_main_event": int(bool(is_main_event)),
+        "scheduled_rounds": int(scheduled_rounds),
+        "weight_class": weight_class or "",
+    }
+
+
+def extract_context_features(fight_data: dict) -> np.ndarray:
+    """
+    Card / stakes context from the fights table (or hypothetical context dict).
+
+    Uses ``is_title_fight`` and ``is_main_event`` from the DB (headliner flag).
+    ``scheduled_rounds`` defaults to 5 if title fight else 3 when missing.
+
+    Note: These signals may correlate with label bias — marquee bouts get more
+    bonus consideration from the UFC. See project write-up for ablation discussion.
+    """
+    fd = fight_data or {}
+    is_title = 1.0 if fd.get("is_title_fight") else 0.0
+    is_main_evt = 1.0 if fd.get("is_main_event") else 0.0
+
+    sr = fd.get("scheduled_rounds")
+    if sr is None:
+        scheduled_rounds = 5 if fd.get("is_title_fight") else 3
+    else:
+        try:
+            scheduled_rounds = int(sr)
+        except (TypeError, ValueError):
+            scheduled_rounds = 3
+    is_five = 1.0 if scheduled_rounds == 5 else 0.0
+
+    wc = (fd.get("weight_class") or "").strip()
+    finish_tend = WEIGHT_CLASS_FINISH_TENDENCY.get(wc, 0.55)
+
+    return np.array(
+        [is_title, is_main_evt, is_five, float(finish_tend)],
+        dtype=np.float32,
+    )
+
+
 def build_matchup_vector(fighter_a: dict, fighter_b: dict) -> np.ndarray:
     """
     Build a 48-dim input vector for the legacy regression NN.
     = fighter_a features (24) + fighter_b features (24).
 
-    For the 72-dim binary classifier pipeline, use build_full_matchup_vector().
+    For the binary classifier pipeline, use build_full_matchup_vector().
     """
     fa = extract_fighter_features(fighter_a)
     fb = extract_fighter_features(fighter_b)
     return np.concatenate([fa, fb])
 
 
-def build_full_matchup_vector(fighter_a: dict, fighter_b: dict) -> np.ndarray:
+def build_career_cross_matchup_vector(fighter_a: dict, fighter_b: dict) -> np.ndarray:
     """
-    Build the full 72-dim input vector for the binary classification pipeline.
-    = fighter_a features (24) + fighter_b features (24) + matchup cross-features (24).
+    72-dim vector: fighter A (24) + fighter B (24) + matchup cross-features (24).
 
-    The cross-features capture matchup dynamics (style clash, offense-vs-defense,
-    competitive balance) that are the strongest predictors of entertaining fights.
+    No odds, card context, or rolling stats — use for small-sample feature selection
+    and ablations (curse of dimensionality with ~300 fights).
     """
     fa = extract_fighter_features(fighter_a)
     fb = extract_fighter_features(fighter_b)
     cross = extract_matchup_features(fighter_a, fighter_b)
     return np.concatenate([fa, fb, cross])
+
+
+def _rolling_vec_for_fighter(fighter: dict) -> np.ndarray:
+    v = fighter.get("_rolling_vec")
+    if v is not None:
+        out = np.asarray(v, dtype=np.float32).ravel()
+        if out.size >= ROLLING_DIM_FIGHTER:
+            return out[:ROLLING_DIM_FIGHTER]
+    return _career_fallback_vec(fighter)
+
+
+def build_full_matchup_vector(fighter_a: dict, fighter_b: dict) -> np.ndarray:
+    """
+    Build the full 115-dim input vector for the binary classification pipeline.
+
+    Layout: fighter_a (24) + fighter_b (24) + matchup cross (24) + odds (5) + context (4)
+    + rolling_a (15) + rolling_b (15) + rolling_matchup (4).
+
+    Odds: ``_fight_odds`` per fighter (from build_raw_pairs). Missing → imputed; has_odds=0.
+
+    Context: ``_fight_context`` dict (same on both corners for a real fight). Missing →
+    generic defaults (non-title, 3 rounds, default finish tendency). For hypotheticals,
+    use make_hypothetical_fight_context() and attach to both fighter dict copies.
+
+    Rolling: ``_rolling_vec`` from leak-safe DB history (training) or
+    ``get_inference_rolling_vector`` (matchmaking). If absent → career fallback.
+    """
+    fa = extract_fighter_features(fighter_a)
+    fb = extract_fighter_features(fighter_b)
+    cross = extract_matchup_features(fighter_a, fighter_b)
+    odds = extract_odds_features(
+        fighter_a.get("_fight_odds"),
+        fighter_b.get("_fight_odds"),
+    )
+    ctx_src = fighter_a.get("_fight_context") or fighter_b.get("_fight_context") or {}
+    context = extract_context_features(ctx_src if isinstance(ctx_src, dict) else {})
+    r_a = _rolling_vec_for_fighter(fighter_a)
+    r_b = _rolling_vec_for_fighter(fighter_b)
+    r_x = compute_rolling_matchup_features(r_a, r_b)
+    return np.concatenate([fa, fb, cross, odds, context, r_a, r_b, r_x])
 
 
 def compute_fight_quality_score(fight: dict, db) -> Optional[float]:
@@ -377,6 +589,19 @@ def compute_fighter_style_metrics(fighter: dict, db) -> dict:
 
 
 # ── Utility ──────────────────────────────────────────────────────────────────
+
+def _american_to_prob(odds) -> float:
+    """Convert American odds to implied probability (0-1). Unknown → 0.5."""
+    if odds is None or odds == 0:
+        return 0.5
+    try:
+        odds = float(odds)
+    except (TypeError, ValueError):
+        return 0.5
+    if odds < 0:
+        return abs(odds) / (abs(odds) + 100.0)
+    return 100.0 / (odds + 100.0)
+
 
 def _norm(val: float, lo: float, hi: float) -> float:
     """Normalize to [0, 1]."""

@@ -17,6 +17,7 @@ data/*.sqlite
 # Scraped artifacts
 *.zip
 *.csv
+!data/rolling_features_cache.csv
 *.json.gz
 
 # Exception: ground-truth label CSVs are checked in so teammates can sync

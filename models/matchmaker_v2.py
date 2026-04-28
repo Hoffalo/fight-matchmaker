@@ -8,13 +8,15 @@ the matchups most likely to produce entertaining fights.
 
 Pipeline per pairing:
   1. Look up both fighters in the DB
-  2. extract_fighter_features(A) → 24 dims
+  2. extract_fighter_features(A) → 24 dims (career + overlaid recent form when rolling exists)
   3. extract_fighter_features(B) → 24 dims
   4. extract_matchup_features(A, B) → 24 dims
-  5. Concatenate → 72-dim vector
-  6. Average both orderings (A,B) and (B,A) for symmetry
-  7. Scale with the fitted StandardScaler
-  8. Model.predict_proba → P(bonus fight)
+  6. extract_odds_features(odds_A, odds_B) → 5 dims
+  7. extract_context_features(fight row or hypothetical dict) → 4 dims
+  8. Rolling vectors from fight_stats (15 + 15 + 4 matchup) → 115-dim total
+  9. Average both orderings (A,B) and (B,A) for symmetry
+  10. Scale with the fitted StandardScaler
+  11. Model.predict_proba → P(bonus fight)
 
 The greedy card builder reuses the constraint logic from matchmaker.py:
 each fighter appears at most once on a card.
@@ -24,6 +26,7 @@ import random
 import time
 from dataclasses import dataclass, field
 from itertools import combinations
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import numpy as np
@@ -75,23 +78,53 @@ class ScoredMatchup:
 # Feature builder (wraps feature_engineering.py)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_72_vector(fighter_a: dict, fighter_b: dict, fe_module) -> np.ndarray:
+def _build_81_vector(fighter_a: dict, fighter_b: dict, fe_module) -> np.ndarray:
     """
-    Build the full 72-dim feature vector from two fighter stat dicts.
+    Build the full feature vector from two fighter stat dicts (115-dim).
 
-    Layout: [fighter_A_24 | fighter_B_24 | matchup_cross_24]
+    Layout: [fighter_A_24 | fighter_B_24 | matchup_cross_24 | odds_5 | context_4 |
+             rolling_A_15 | rolling_B_15 | rolling_matchup_4]
+
+    Odds: ``_fight_odds`` on each fighter. Context: ``_fight_context`` (same dict
+    on both corners for real fights); for hypotheticals use
+    ``make_hypothetical_fight_context()`` from feature_engineering.
+
+    Rolling: filled from ``_rolling_vec`` on each dict; if missing and ``db_path``
+    was used to attach inference-time rolling, vectors are already present.
     """
-    fa = fe_module.extract_fighter_features(fighter_a)     # (24,)
-    fb = fe_module.extract_fighter_features(fighter_b)     # (24,)
-    cross = fe_module.extract_matchup_features(fighter_a, fighter_b)  # (24,)
-    return np.concatenate([fa, fb, cross])
+    return fe_module.build_full_matchup_vector(fighter_a, fighter_b)
+
+
+def _attach_inference_rolling(
+    db_path: Optional[str], fighter_a: dict, fighter_b: dict,
+) -> tuple[dict, dict]:
+    """Attach leak-free-through-today rolling vectors for matchmaking (all DB history)."""
+    if not db_path:
+        return fighter_a, fighter_b
+    p = Path(db_path)
+    if not p.is_file():
+        return fighter_a, fighter_b
+    aid, bid = fighter_a.get("id"), fighter_b.get("id")
+    if aid is None or bid is None:
+        return fighter_a, fighter_b
+    from models.rolling_features import get_inference_rolling_vector
+
+    ra = get_inference_rolling_vector(int(aid), p, career=fighter_a)
+    rb = get_inference_rolling_vector(int(bid), p, career=fighter_b)
+    return (
+        {**fighter_a, "_rolling_vec": ra},
+        {**fighter_b, "_rolling_vec": rb},
+    )
 
 
 def _build_symmetric_vector(fighter_a: dict, fighter_b: dict, fe_module) -> np.ndarray:
-    """Average both orderings so A-vs-B == B-vs-A."""
-    vec_ab = _build_72_vector(fighter_a, fighter_b, fe_module)
-    vec_ba = _build_72_vector(fighter_b, fighter_a, fe_module)
-    return ((vec_ab + vec_ba) / 2.0).astype(np.float32)
+    """Average both orderings so A-vs-B == B-vs-A; apply ``pipeline_config.SELECTED_FEATURES`` if set."""
+    vec_ab = _build_81_vector(fighter_a, fighter_b, fe_module)
+    vec_ba = _build_81_vector(fighter_b, fighter_a, fe_module)
+    v = ((vec_ab + vec_ba) / 2.0).astype(np.float32)
+    from models.pipeline_config import SELECTED_FEATURES as _sf
+
+    return fe_module.subset_full_feature_vector(v, _sf)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -327,6 +360,9 @@ class MatchmakerV2:
         self.db_path = db_path
         self._fighter_cache: dict[int, dict] = fighter_cache or {}
 
+    def _attach_inference_rolling_pair(self, a: dict, b: dict) -> tuple[dict, dict]:
+        return _attach_inference_rolling(self.db_path, a, b)
+
     # ── DB helpers ────────────────────────────────────────────────────────
 
     def _get_db(self):
@@ -356,18 +392,46 @@ class MatchmakerV2:
 
     # ── Scoring ──────────────────────────────────────────────────────────
 
-    def score_matchup(self, fighter_a_id: int, fighter_b_id: int) -> ScoredMatchup:
+    def score_matchup(
+        self,
+        fighter_a_id: int,
+        fighter_b_id: int,
+        *,
+        is_title_fight: bool = False,
+        is_main_event: bool = False,
+        scheduled_rounds: int | None = None,
+        weight_class: str | None = None,
+    ) -> ScoredMatchup:
         """
         Score a single pairing by entertainment probability.
 
-        Returns a ScoredMatchup with probability, star rating, top factors,
-        style summary, and raw feature values for downstream use.
+        Optional ``is_title_fight`` / ``is_main_event`` / ``scheduled_rounds`` /
+        ``weight_class`` set fight-context features for hypothetical bouts (no DB row).
+        If ``weight_class`` is omitted and both fighters share a division, that
+        value is used for the weight-class finish proxy.
         """
         a = self._get_fighter(fighter_a_id)
         b = self._get_fighter(fighter_b_id)
-        return self._score_pair(a, b)
+        wc = weight_class
+        if wc is None:
+            wa = (a.get("weight_class") or "").strip()
+            wb = (b.get("weight_class") or "").strip()
+            wc = wa if wa and wa == wb else ""
+        fc = self.fe.make_hypothetical_fight_context(
+            is_title_fight=is_title_fight,
+            is_main_event=is_main_event,
+            scheduled_rounds=scheduled_rounds,
+            weight_class=wc or "",
+        )
+        return self._score_pair(a, b, fight_context=fc)
 
-    def _score_pair(self, a: dict, b: dict) -> ScoredMatchup:
+    def _score_pair(
+        self, a: dict, b: dict, fight_context: dict | None = None,
+    ) -> ScoredMatchup:
+        if fight_context is not None:
+            a = {**a, "_fight_context": fight_context}
+            b = {**b, "_fight_context": fight_context}
+        a, b = self._attach_inference_rolling_pair(a, b)
         vec = _build_symmetric_vector(a, b, self.fe).reshape(1, -1)
         probs = _model_predict_proba(self.model, vec, self.scaler)
         prob = float(probs[0])
@@ -385,10 +449,22 @@ class MatchmakerV2:
             raw_features={"fighter_a": a, "fighter_b": b},
         )
 
-    def _score_batch(self, pairs: list[tuple[dict, dict]]) -> list[ScoredMatchup]:
+    def _score_batch(
+        self,
+        pairs: list[tuple[dict, dict]],
+        fight_context: dict | None = None,
+    ) -> list[ScoredMatchup]:
         """Vectorised scoring for many pairs at once."""
         if not pairs:
             return []
+
+        if fight_context is not None:
+            pairs = [
+                ({**a, "_fight_context": fight_context}, {**b, "_fight_context": fight_context})
+                for a, b in pairs
+            ]
+
+        pairs = [self._attach_inference_rolling_pair(a, b) for a, b in pairs]
 
         vecs = np.stack([
             _build_symmetric_vector(a, b, self.fe) for a, b in pairs
@@ -443,7 +519,8 @@ class MatchmakerV2:
         )
 
         t0 = time.perf_counter()
-        results = self._score_batch(pairs)
+        fc = self.fe.make_hypothetical_fight_context(weight_class=weight_class)
+        results = self._score_batch(pairs, fight_context=fc)
         elapsed = time.perf_counter() - t0
 
         results.sort(key=lambda m: m.entertainment_probability, reverse=True)
@@ -508,16 +585,37 @@ class MatchmakerV2:
 
     # ── Narrative ────────────────────────────────────────────────────────
 
-    def explain_matchup(self, fighter_a_id: int, fighter_b_id: int) -> str:
+    def explain_matchup(
+        self,
+        fighter_a_id: int,
+        fighter_b_id: int,
+        *,
+        is_title_fight: bool = False,
+        is_main_event: bool = False,
+        scheduled_rounds: int | None = None,
+        weight_class: str | None = None,
+    ) -> str:
         """
         Generate a rich, human-readable narrative explaining WHY a matchup
         is (or isn't) predicted to be entertaining.
 
         Uses actual feature values to make each explanation unique.
+        Context kwargs match ``score_matchup`` (hypothetical card placement).
         """
         a = self._get_fighter(fighter_a_id)
         b = self._get_fighter(fighter_b_id)
-        scored = self._score_pair(a, b)
+        wc = weight_class
+        if wc is None:
+            wa = (a.get("weight_class") or "").strip()
+            wb = (b.get("weight_class") or "").strip()
+            wc = wa if wa and wa == wb else ""
+        fc = self.fe.make_hypothetical_fight_context(
+            is_title_fight=is_title_fight,
+            is_main_event=is_main_event,
+            scheduled_rounds=scheduled_rounds,
+            weight_class=wc or "",
+        )
+        scored = self._score_pair(a, b, fight_context=fc)
         return _generate_narrative(
             a, b,
             scored.entertainment_probability,

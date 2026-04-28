@@ -3,8 +3,8 @@ models/data_loader.py
 Canonical data loading for the UFC fight entertainment prediction pipeline.
 
 Delegates to the split/augmentation infrastructure in data_splits.py (Mattheus's
-M1/M2/M3 work) while using 72-dim feature vectors with matchup cross-features
-(build_full_matchup_vector from feature_engineering.py).
+M1/M2/M3 work) while using 115-dim feature vectors with matchup cross-features,
+odds, context, and rolling fight_stats features (build_full_matchup_vector).
 
 This module is the single entry point for all classification models
 (baselines.py, nn_binary.py, matchmaker_v2.py).
@@ -25,11 +25,16 @@ from pathlib import Path
 import numpy as np
 from sklearn.preprocessing import StandardScaler
 
+from config import FEATURE_DIM
 from models.feature_engineering import ALL_FEATURE_NAMES
+
+assert len(ALL_FEATURE_NAMES) == FEATURE_DIM, (
+    "ALL_FEATURE_NAMES length must match FEATURE_DIM in config.py"
+)
 
 logger = logging.getLogger(__name__)
 
-N_FEATURES = 72
+N_FEATURES = FEATURE_DIM
 
 # Match the actual DB date ranges (Jan 2025 – present).
 # These mirror models/data_splits.py VAL_CUTOFF / TEST_CUTOFF.
@@ -38,24 +43,32 @@ VAL_CUTOFF   = "2026-01-01"   # val: Sep 2025 – Dec 2025; test: Jan 2026+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Core loader — uses partner's split infrastructure with 72-dim features
+# Core loader — uses partner's split infrastructure with 115-dim features
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_canonical_splits(
     db_path: str = "data/ufc_matchmaker.db",
     train_cutoff: str = TRAIN_CUTOFF,
     val_cutoff: str = VAL_CUTOFF,
+    selected_features: list[str] | None = None,
 ) -> dict:
     """
-    Canonical split pipeline using data_splits.py infrastructure + 72-dim features.
+    Canonical split pipeline using data_splits.py infrastructure + 115-dim features.
 
     Pipeline
     --------
-    1. build_raw_pairs(db) → one row per fight, raw fighter dicts
+    1. build_raw_pairs(db) → one row per fight, raw fighter dicts (+ rolling)
     2. temporal_split_raw() → split by date BEFORE augmentation
-    3. augment_pair(vector_fn=build_full_matchup_vector) → 72-dim, both orderings
+    3. augment_pair(vector_fn=build_full_matchup_vector) → 115-dim, both orderings
     4. assert_no_fight_id_leakage() → runtime safety check
-    5. Fit StandardScaler on train only
+    5. Optional column filter (``selected_features`` / ``pipeline_config``)
+    6. Fit StandardScaler on train only
+
+    Parameters
+    ----------
+    selected_features : optional list of feature names (subset of ``ALL_FEATURE_NAMES``).
+        If ``None``, uses non-empty ``models.pipeline_config.SELECTED_FEATURES``;
+        if that is also unset/empty, all ``FEATURE_DIM`` columns are kept.
 
     Returns
     -------
@@ -64,7 +77,7 @@ def get_canonical_splits(
         X_val, y_val           — scaled validation arrays
         X_test, y_test         — scaled test arrays
         scaler                 — fitted StandardScaler
-        feature_names          — list of 72 feature names
+        feature_names          — list of names (length = number of columns kept)
         event_ids_test         — int array mapping test rows to events
         raw_train              — raw train dict (for k-fold CV downstream)
         summary                — dict with dataset statistics
@@ -86,6 +99,17 @@ def get_canonical_splits(
         )
 
     db = Database(db_path_resolved)
+
+    if selected_features is not None and len(selected_features) > 0:
+        effective_sel: list[str] | None = list(selected_features)
+    else:
+        try:
+            from models.pipeline_config import SELECTED_FEATURES as _pc_sel
+            effective_sel = (
+                list(_pc_sel) if _pc_sel is not None and len(_pc_sel) > 0 else None
+            )
+        except ImportError:
+            effective_sel = None
 
     # ── 1. Load raw pairs (one row per fight, no vectors yet) ────────────
     raw = build_raw_pairs(db)
@@ -109,7 +133,7 @@ def get_canonical_splits(
     if len(raw_test["y"]) == 0:
         raise ValueError(f"No test fights on/after {val_cutoff}.")
 
-    # ── 3. Augment within each split (72-dim) ────────────────────────────
+    # ── 3. Augment within each split (115-dim) ────────────────────────────
     vector_fn = build_full_matchup_vector
 
     X_train, y_train, meta_train = augment_pair(raw_train, vector_fn=vector_fn)
@@ -126,6 +150,20 @@ def get_canonical_splits(
         X_train = np.nan_to_num(X_train, nan=0.0)
         X_val   = np.nan_to_num(X_val, nan=0.0)
         X_test  = np.nan_to_num(X_test, nan=0.0)
+
+    feature_names_out = list(ALL_FEATURE_NAMES)
+    if effective_sel is not None:
+        missing = [n for n in effective_sel if n not in feature_names_out]
+        if missing:
+            raise ValueError(
+                f"selected_features unknown or not in ALL_FEATURE_NAMES: {missing[:8]}..."
+            )
+        col_idx = [feature_names_out.index(n) for n in effective_sel]
+        X_train = X_train[:, col_idx]
+        X_val = X_val[:, col_idx]
+        X_test = X_test[:, col_idx]
+        feature_names_out = [feature_names_out[i] for i in col_idx]
+        logger.info("Feature column filter: %d → %d columns", len(ALL_FEATURE_NAMES), len(feature_names_out))
 
     # ── 6. Fit scaler on train only ──────────────────────────────────────
     scaler = StandardScaler()
@@ -144,7 +182,8 @@ def get_canonical_splits(
     # ── 8. Summary ───────────────────────────────────────────────────────
     summary = {
         "total_unique_fights": total_fights,
-        "feature_dim": N_FEATURES,
+        "feature_dim": len(feature_names_out),
+        "feature_filter_active": effective_sel is not None,
         "train": {
             "fights": len(raw_train["y"]),
             "samples": len(y_train),
@@ -173,7 +212,7 @@ def get_canonical_splits(
         "X_val": X_val_scaled, "y_val": y_val.astype(np.int32),
         "X_test": X_test_scaled, "y_test": y_test.astype(np.int32),
         "scaler": scaler,
-        "feature_names": list(ALL_FEATURE_NAMES),
+        "feature_names": feature_names_out,
         "event_ids_test": event_ids_test,
         "raw_train": raw_train,
         "summary": summary,
@@ -184,17 +223,16 @@ def load_real_data(
     db_path: str = "data/ufc_matchmaker.db",
     train_cutoff: str = TRAIN_CUTOFF,
     val_cutoff: str = VAL_CUTOFF,
+    selected_features: list[str] | None = None,
 ) -> dict:
     """
-    Load fight data from the real SQLite DB — delegates to get_canonical_splits().
-
-    This is the backward-compatible entry point used by baselines.py,
-    nn_binary.py, and matchmaker_v2.py.
+    Load fight data from SQLite — delegates to get_canonical_splits().
     """
     return get_canonical_splits(
         db_path=db_path,
         train_cutoff=train_cutoff,
         val_cutoff=val_cutoff,
+        selected_features=selected_features,
     )
 
 
@@ -207,7 +245,7 @@ def _print_summary(summary: dict) -> None:
     lines = [
         "",
         "=" * 72,
-        "  DATA SUMMARY — UFC Fight Entertainment Dataset (72-dim)",
+        "  DATA SUMMARY — UFC Fight Entertainment Dataset (115-dim)",
         "=" * 72,
         f"  Total unique fights:  {summary['total_unique_fights']}",
         f"  Feature dimensions:   {summary['feature_dim']}",
@@ -262,7 +300,7 @@ if __name__ == "__main__":
         print(f"Train positive rate: {splits['y_train'].mean():.3f}")
         print(f"Val positive rate:   {splits['y_val'].mean():.3f}")
         print(f"Test positive rate:  {splits['y_test'].mean():.3f}")
-        assert splits["X_train"].shape[1] == 72, "Feature dim must be 72"
+        assert splits["X_train"].shape[1] == len(splits["feature_names"]), "Feature dim mismatch"
         print("\nAll checks passed.")
 
     except FileNotFoundError as e:

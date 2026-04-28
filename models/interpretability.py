@@ -4,7 +4,8 @@ SHAP-based model interpretability for the UFC fight entertainment classifier.
 
 Generates presentation-ready plots that explain:
   - Which features matter most globally (beeswarm, bar)
-  - Why the matchup cross-features (48-71) are the key differentiator
+  - Why the matchup cross-features (48-71), odds (72-76), fight context (77-80),
+    and rolling fight_stats blocks (81+) are key differentiators
   - Why a *specific* matchup is predicted as entertaining (waterfall)
   - How different models agree/disagree on feature importance
   - Whether importance is concentrated in matchup dynamics vs individual stats
@@ -23,47 +24,19 @@ import shap
 matplotlib.use("Agg")
 logger = logging.getLogger(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Feature schema
-# ─────────────────────────────────────────────────────────────────────────────
+from models import feature_engineering as _fe_module
 
-FIGHTER_A_FEATURES = [
-    "A_sig_strike_rate", "A_takedown_accuracy", "A_ko_rate", "A_sub_rate",
-    "A_strike_defense", "A_takedown_defense", "A_cardio_index", "A_reach",
-    "A_height", "A_age", "A_win_streak", "A_loss_streak", "A_fights_total",
-    "A_finish_rate", "A_rounds_fought", "A_control_time_rate",
-    "A_reversals_rate", "A_knockdowns_landed_rate", "A_knockdowns_absorbed_rate",
-    "A_head_strike_pct", "A_body_strike_pct", "A_leg_strike_pct",
-    "A_clinch_strike_pct", "A_ground_strike_pct",
-]
-
-FIGHTER_B_FEATURES = [
-    "B_sig_strike_rate", "B_takedown_accuracy", "B_ko_rate", "B_sub_rate",
-    "B_strike_defense", "B_takedown_defense", "B_cardio_index", "B_reach",
-    "B_height", "B_age", "B_win_streak", "B_loss_streak", "B_fights_total",
-    "B_finish_rate", "B_rounds_fought", "B_control_time_rate",
-    "B_reversals_rate", "B_knockdowns_landed_rate", "B_knockdowns_absorbed_rate",
-    "B_head_strike_pct", "B_body_strike_pct", "B_leg_strike_pct",
-    "B_clinch_strike_pct", "B_ground_strike_pct",
-]
-
-CROSS_FEATURES = [
-    "style_clash", "striking_differential", "grappling_differential",
-    "aggression_mismatch", "pace_mismatch", "reach_advantage",
-    "orthodox_vs_southpaw", "offensive_vs_defensive", "wrestling_vs_striker",
-    "experience_gap", "durability_mismatch", "cardio_mismatch",
-    "finish_rate_combined", "ko_probability", "sub_probability",
-    "decision_probability", "competitive_balance", "action_density_prediction",
-    "ground_game_clash", "clinch_threat", "upset_potential", "rankings_gap",
-    "momentum_differential", "marketability_score",
-]
-
-ALL_FEATURE_NAMES = FIGHTER_A_FEATURES + FIGHTER_B_FEATURES + CROSS_FEATURES
+ALL_FEATURE_NAMES = _fe_module.ALL_FEATURE_NAMES
 
 CATEGORY_SLICES = {
     "Fighter A Stats": slice(0, 24),
     "Fighter B Stats": slice(24, 48),
     "Matchup Cross-Features": slice(48, 72),
+    "Odds Features": slice(72, 77),
+    "Fight Context": slice(77, 81),
+    "Rolling Fighter A": slice(81, 96),
+    "Rolling Fighter B": slice(96, 111),
+    "Rolling Matchup": slice(111, 115),
 }
 
 DOMINANCE_THRESHOLD = 0.30
@@ -194,7 +167,7 @@ def explain_matchup(
 
     Parameters
     ----------
-    X_single : 1-D array of shape (72,) or 2-D of shape (1, 72)
+    X_single : 1-D array of shape (115,) or 2-D of shape (1, 115)
 
     Saves
     -----
@@ -291,7 +264,7 @@ def compare_feature_importance(
 
     Returns
     -------
-    dict mapping model_name → mean absolute SHAP values array (72,)
+        dict mapping model_name → mean absolute SHAP values array (115,)
     """
     if feature_names is None:
         feature_names = ALL_FEATURE_NAMES

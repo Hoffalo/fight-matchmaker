@@ -2,7 +2,8 @@
 config.py — Central configuration for UFC Matchmaker
 """
 # Configuration for UFC Fight Matchmaker
-# Pipeline: 72-dim features → binary classification (bonus fight prediction) → matchmaker ranking
+# Pipeline: 115-dim features (career + matchup + odds + context + rolling fight_stats)
+# → binary classification (bonus fight prediction) → matchmaker ranking
 # Legacy 48-dim regression pipeline has been deprecated
 
 import os
@@ -38,15 +39,26 @@ URLS = {
     "ufc_rankings":    "https://www.ufc.com/rankings",
 }
 
+# ── Binary classification (temporal train ~338 unique fights, Jan–Aug 2025) ──
+# 91 bonus / 247 not → 26.9% positive; same ratio holds after (A,B)/(B,A) augmentation.
+TRAIN_UNIQUE_FIGHTS = 338
+TRAIN_POSITIVE_FIGHTS = 91
+TRAIN_NEGATIVE_FIGHTS = 247
+TRAIN_POSITIVE_RATE = TRAIN_POSITIVE_FIGHTS / TRAIN_UNIQUE_FIGHTS  # ≈ 0.269
+SCALE_POS_WEIGHT = TRAIN_NEGATIVE_FIGHTS / TRAIN_POSITIVE_FIGHTS  # ≈ 2.714 (XGBoost / diagnostics)
+
 # ── Feature dimensions ────────────────────────────────────────────────────────
-FEATURE_DIM = 72
+FEATURE_DIM = 115
 USE_CROSS_FEATURES = True
 
 # ── Binary classification pipeline ───────────────────────────────────────────
 BINARY_CLASSIFICATION_CONFIG = {
     "target": "is_bonus_fight",
     "positive_label": 1,
-    "feature_dim": 72,
+    "feature_dim": 115,
+    "train_unique_fights": TRAIN_UNIQUE_FIGHTS,
+    "train_positive_rate": TRAIN_POSITIVE_RATE,
+    "scale_pos_weight": SCALE_POS_WEIGHT,
     "split_dates": {
         "train_end": "2025-09-01",
         "val_end": "2026-01-01",
@@ -56,7 +68,7 @@ BINARY_CLASSIFICATION_CONFIG = {
 
 # ── Neural Network (legacy regression model — kept for backward compat) ──────
 NN = {
-    "input_dim": 72,
+    "input_dim": 115,
     "hidden_layers": [256, 128, 64, 32],
     "dropout": 0.3,
     "learning_rate": 1e-3,

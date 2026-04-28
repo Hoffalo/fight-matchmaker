@@ -20,7 +20,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
 
 from data.db import Database
-from models.feature_engineering import build_matchup_vector, build_full_matchup_vector
+from models.feature_engineering import (
+    build_matchup_vector,
+    build_full_matchup_vector,
+    subset_full_feature_vector,
+)
 from config import BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -37,6 +41,17 @@ def _load_fighters(db: Database) -> dict[int, dict]:
         return {row["id"]: dict(row) for row in conn.execute("SELECT * FROM fighters")}
 
 
+def _parse_odds(raw) -> float | None:
+    """Coerce a DB odds value to float, or None if absent/unparseable."""
+    if raw is None:
+        return None
+    try:
+        v = float(raw)
+        return v if v != 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
 def _build_event_fights(
     db: Database,
     fighters: dict[int, dict],
@@ -47,26 +62,78 @@ def _build_event_fights(
 
     Parameters
     ----------
-    use_72_dim : if True (default), uses build_full_matchup_vector (72 features).
-                 Set False only for legacy 48-dim experiments.
+    use_72_dim : bool
+        If True (default), builds ``build_full_matchup_vector`` (115-D: odds,
+        context, rolling aggregates) then applies ``SELECTED_FEATURES`` from
+        ``models.pipeline_config`` so row ``X`` matches training/inference width.
+        If False, uses legacy ``build_matchup_vector`` (48-D); no subsetting.
     """
     vector_fn = build_full_matchup_vector if use_72_dim else build_matchup_vector
+
+    from models.rolling_features import attach_rolling_to_fighter_dicts
 
     with db.connect() as conn:
         rows = conn.execute(
             """SELECT f.id, f.fighter1_id, f.fighter2_id,
-                      f.is_bonus_fight, e.id AS event_id, e.date, e.name AS event_name
+                      f.is_bonus_fight, f.fighter1_odds, f.fighter2_odds,
+                      f.is_title_fight, f.is_main_event, f.weight_class,
+                      e.id AS event_id, e.date, e.name AS event_name
                FROM fights f LEFT JOIN events e ON e.id = f.event_id
                WHERE f.fighter1_id IS NOT NULL AND f.fighter2_id IS NOT NULL"""
         ).fetchall()
 
-    out: list[dict] = []
+    candidates: list = []
     for r in rows:
         f1 = fighters.get(r["fighter1_id"])
         f2 = fighters.get(r["fighter2_id"])
         if not (f1 and f2):
             continue
+        candidates.append((r, f1, f2))
+
+    roll_lookup = {}
+    if use_72_dim and candidates:
+        fight_rows = [
+            {
+                "fight_id": c[0]["id"],
+                "fighter1_id": c[0]["fighter1_id"],
+                "fighter2_id": c[0]["fighter2_id"],
+                "event_date": c[0]["date"] or "",
+            }
+            for c in candidates
+        ]
+        roll_lookup = attach_rolling_to_fighter_dicts(str(db.path), fight_rows, fighters)
+
+    out: list[dict] = []
+    for r, f1, f2 in candidates:
+        if use_72_dim:
+            odds1 = _parse_odds(r["fighter1_odds"])
+            odds2 = _parse_odds(r["fighter2_odds"])
+            is_t = bool(r["is_title_fight"])
+            fight_ctx = {
+                "is_title_fight": int(is_t),
+                "is_main_event": int(bool(r["is_main_event"])),
+                "scheduled_rounds": 5 if is_t else 3,
+                "weight_class": (r["weight_class"] or "").strip(),
+            }
+            k1 = (r["id"], r["fighter1_id"])
+            k2 = (r["id"], r["fighter2_id"])
+            f1 = {
+                **f1,
+                "_fight_odds": odds1,
+                "_fight_context": fight_ctx,
+                "_rolling_vec": roll_lookup[k1],
+            }
+            f2 = {
+                **f2,
+                "_fight_odds": odds2,
+                "_fight_context": fight_ctx,
+                "_rolling_vec": roll_lookup[k2],
+            }
         vec = vector_fn(f1, f2)
+        if use_72_dim:
+            from models.pipeline_config import SELECTED_FEATURES as _sf
+
+            vec = subset_full_feature_vector(vec, _sf)
         out.append({
             "fight_id":   r["id"],
             "event_id":   r["event_id"],
@@ -135,7 +202,7 @@ def backtest(
              If None, falls back to the built-in LogReg baseline.
     scaler : fitted StandardScaler for the model. If None and model is None,
              a scaler is fitted on the training split automatically.
-    use_72_dim : use 72-dim feature vectors (for binary classifier pipeline
+    use_72_dim : use 115-dim feature vectors (for binary classifier pipeline
                  models from baselines.py / nn_binary.py).
 
     Returns summary dict and writes outputs/backtest_results.{csv,md}.

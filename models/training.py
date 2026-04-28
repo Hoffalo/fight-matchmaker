@@ -87,11 +87,11 @@ def build_classification_dataset(
     return X, y, meta
 
 
-# For the 72-dim classification pipeline (XGBoost, RF, FightBonusNN),
+# For the 115-dim classification pipeline (XGBoost, RF, FightBonusNN),
 # use models.data_loader.get_canonical_splits() which delegates to
 # data_splits.temporal_split(use_72_dim=True).
 # The old build_classification_dataset_72() has been removed — data_loader
-# is now the single canonical entry point for 72-dim data.
+# is now the single canonical entry point for 115-dim data.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
