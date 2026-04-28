@@ -22,12 +22,27 @@ from data.db import Database
 logger = logging.getLogger(__name__)
 
 WIKI_BASE = "https://en.wikipedia.org/wiki/"
+WIKI_API = "https://en.wikipedia.org/w/api.php"
 HEADERS = {
     "User-Agent": (
         "UFC-Matchmaker-Research/1.0 "
         "(educational; lorenzohoff2006@gmail.com)"
     )
 }
+
+# Events known to lack a per-event Wikipedia page (regional/dev leagues, etc).
+# Their fights are not reliable negatives for is_bonus_fight — see
+# events_with_reliable_bonus_data() so training can filter them.
+EXCLUDED_EVENT_NAMES: set[str] = {
+    "UFC - Road to UFC 4.6",  # Asian developmental sub-league round, no per-round Wiki page
+}
+
+# UFCStats normalizes broadcast-tagged events to "UFC Fight Night", but
+# Wikipedia preserves "UFC on ESPN" / "UFC on ABC" / "UFC on Fox" titles.
+# When the direct slug 404s we fall back to Wikipedia search.
+_VALID_EVENT_TITLE_RX = re.compile(
+    r"^UFC (Fight Night|on \w+|\d+):", re.IGNORECASE
+)
 
 
 # ── URL slug mapping ─────────────────────────────────────────────────────────
@@ -49,6 +64,73 @@ def event_name_to_wiki_slug(event_name: str) -> str:
 
 def wiki_url(event_name: str) -> str:
     return WIKI_BASE + quote(event_name_to_wiki_slug(event_name), safe=":_")
+
+
+def _matchup_key(event_title: str) -> frozenset[str]:
+    """
+    Extract the {fighter_a, fighter_b} matchup tokens from a UFC event title,
+    normalized for safe comparison across naming conventions:
+
+      "UFC Fight Night: Whittaker vs. De Ridder"  -> {'whittaker', 'de ridder'}
+      "UFC on ABC: Whittaker vs. de Ridder"       -> {'whittaker', 'de ridder'}
+      "UFC Fight Night: Royval vs. Taira"         -> {'royval', 'taira'}
+
+    Returns an empty set if the title has no `:` or `vs.` structure.
+    """
+    m = re.search(r":\s*(.+?)\s*$", event_title)
+    if not m:
+        return frozenset()
+    parts = re.split(r"\s+vs\.?\s+", m.group(1), flags=re.I)
+    if len(parts) != 2:
+        return frozenset()
+    out: set[str] = set()
+    for p in parts:
+        norm = re.sub(r"[^a-z\s]", "", p.lower())
+        norm = re.sub(r"\s+", " ", norm).strip()
+        if norm:
+            out.add(norm)
+    return frozenset(out)
+
+
+def _wiki_search_event_url(event_name: str) -> str | None:
+    """
+    Use Wikipedia's search API to find the canonical page when the direct
+    slug fails (e.g. UFCStats says "UFC Fight Night: X vs. Y" but Wikipedia
+    files the same event under "UFC on ESPN: X vs. Y").
+
+    Walks all hits and returns the first whose title matches a UFC-event
+    pattern AND has the same matchup as `event_name` — this rejects similar
+    older events (e.g. "Royval vs. Taira" is not the same fight as
+    "Taira vs. Park" even though both involve Taira).
+    """
+    try:
+        resp = requests.get(
+            WIKI_API,
+            params={
+                "action": "query",
+                "list": "search",
+                "srsearch": event_name,
+                "srlimit": 8,
+                "format": "json",
+            },
+            headers=HEADERS,
+            timeout=20,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        logger.warning("Wikipedia search API failed for %r: %s", event_name, e)
+        return None
+
+    src_key = _matchup_key(event_name)
+    hits = resp.json().get("query", {}).get("search", [])
+    for hit in hits:
+        title = hit.get("title", "")
+        if not _VALID_EVENT_TITLE_RX.match(title):
+            continue
+        if src_key and _matchup_key(title) != src_key:
+            continue
+        return WIKI_BASE + quote(title.replace(" ", "_"), safe=":_")
+    return None
 
 
 # ── Bonus list parsing ──────────────────────────────────────────────────────
@@ -85,11 +167,23 @@ def parse_bonus_list_item(text: str) -> tuple[str | None, list[str]]:
     body = re.sub(r"\[\s*\d+\s*\]", "", body)  # strip footnote refs like [1]
 
     if bonus_type == "FOTN":
+        # Common case: a single matchup "A vs. B"
         parts = _VS_SPLIT.split(body)
         if len(parts) == 2:
             return bonus_type, [_clean_name(parts[0]), _clean_name(parts[1])]
-        # Fallback: occasionally a comma-separated pair
-        return bonus_type, [_clean_name(p) for p in _NAME_LIST_SPLIT.split(body) if p.strip()]
+        # Multi-FOTN case: "A vs. B and C vs. D" or "A vs. B, C vs. D"
+        # — split on connectives to get matchup chunks, then split each by "vs."
+        out: list[str] = []
+        for chunk in _NAME_LIST_SPLIT.split(body):
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            sub = _VS_SPLIT.split(chunk)
+            if len(sub) == 2:
+                out.extend([_clean_name(sub[0]), _clean_name(sub[1])])
+            else:
+                out.append(_clean_name(chunk))
+        return bonus_type, [n for n in out if n]
 
     # POTN
     return bonus_type, [_clean_name(p) for p in _NAME_LIST_SPLIT.split(body) if p.strip()]
@@ -101,20 +195,38 @@ def _clean_name(s: str) -> str:
 
 # ── Page fetch + section extraction ─────────────────────────────────────────
 
+def _fetch_page(url: str) -> requests.Response | None:
+    try:
+        return requests.get(url, headers=HEADERS, timeout=20)
+    except requests.RequestException as e:
+        logger.warning("Wikipedia fetch failed for %s: %s", url, e)
+        return None
+
+
 def fetch_event_bonuses(event_name: str) -> list[dict]:
     """
-    Scrape one event's bonuses. Returns list of
-    {bonus_type, fighter_name, source_url}.
-    Empty list if the page or section is missing.
+    Scrape one event's bonuses. Tries the direct slug first; on 404 falls
+    back to Wikipedia search to handle UFCStats↔Wikipedia naming drift
+    ("UFC Fight Night" ↔ "UFC on ESPN" / "UFC on ABC", lowercase 'de'/'van'
+    surnames, etc.).
     """
     url = wiki_url(event_name)
-    try:
-        resp = requests.get(url, headers=HEADERS, timeout=20)
-    except requests.RequestException as e:
-        logger.warning("Wikipedia fetch failed for %r: %s", event_name, e)
-        return []
-    if resp.status_code != 200:
-        logger.info("Wikipedia returned %d for %r (%s)", resp.status_code, event_name, url)
+    resp = _fetch_page(url)
+
+    # Fallback: search API for naming-drift cases
+    if resp is None or resp.status_code != 200:
+        fallback = _wiki_search_event_url(event_name)
+        if fallback and fallback != url:
+            logger.info(
+                "Direct slug 404 for %r; trying search-API URL %s",
+                event_name, fallback,
+            )
+            url = fallback
+            resp = _fetch_page(url)
+
+    if resp is None or resp.status_code != 200:
+        code = resp.status_code if resp else "ERR"
+        logger.info("Wikipedia returned %s for %r (%s)", code, event_name, url)
         return []
 
     soup = BeautifulSoup(resp.text, "lxml")
@@ -182,9 +294,14 @@ def scrape_all_event_bonuses(db: Database, *, sleep_s: float = 0.4) -> dict:
     rows_inserted = 0
     events_with_bonuses = 0
     events_no_bonuses = 0
+    events_excluded = 0
     failed_events: list[str] = []
 
     for ev in events:
+        if ev["name"] in EXCLUDED_EVENT_NAMES:
+            logger.info("Skipping excluded event: %r", ev["name"])
+            events_excluded += 1
+            continue
         time.sleep(sleep_s)
         try:
             bonuses = fetch_event_bonuses(ev["name"])
@@ -203,11 +320,37 @@ def scrape_all_event_bonuses(db: Database, *, sleep_s: float = 0.4) -> dict:
         "events_scanned": len(events),
         "events_with_bonuses": events_with_bonuses,
         "events_no_bonuses": events_no_bonuses,
+        "events_excluded": events_excluded,
         "rows_inserted": rows_inserted,
         "failed_events": failed_events,
     }
     logger.info("Bonus scrape complete: %s", summary)
     return summary
+
+
+def events_with_reliable_bonus_data(db: Database) -> set[int]:
+    """
+    Return event IDs whose bonus labels are trustworthy:
+      - The event has at least one row in fight_bonuses, AND
+      - The event is not in EXCLUDED_EVENT_NAMES.
+
+    Use this to filter the training set per the audit's Strategy D — fights
+    from events with no scraped bonuses (Wikipedia gaps) are not reliable
+    negatives and should be dropped, not labeled is_bonus_fight=0.
+    """
+    with db.connect() as conn:
+        rows = conn.execute(
+            """SELECT DISTINCT e.id
+               FROM events e
+               JOIN fight_bonuses b ON b.event_id = e.id
+               WHERE e.name NOT IN ({})""".format(
+                ",".join("?" * len(EXCLUDED_EVENT_NAMES))
+            ) if EXCLUDED_EVENT_NAMES else
+            """SELECT DISTINCT e.id FROM events e
+               JOIN fight_bonuses b ON b.event_id = e.id""",
+            tuple(EXCLUDED_EVENT_NAMES) if EXCLUDED_EVENT_NAMES else (),
+        ).fetchall()
+    return {r["id"] for r in rows}
 
 
 # ── Name resolution + fight matching ────────────────────────────────────────
@@ -347,6 +490,24 @@ def _fuzzy_lookup(norm_query: str, lookup: dict[str, int]) -> int | None:
         candidates = [v for k, v in lookup.items() if k.split() and k.split()[-1] == last]
         if len(candidates) == 1:
             return candidates[0]
+
+    # 4. Last-name match + first-name prefix-compatible (handles short-form
+    #    first names like Shara↔Sharabutdin, Tony↔Anthony, where the short
+    #    form is a prefix of the full form). Only fires when exactly one
+    #    candidate disambiguates this way.
+    if len(q_tokens) >= 2:
+        last = q_tokens[-1]
+        q_first = q_tokens[0]
+        prefix_candidates: list[int] = []
+        for k, v in lookup.items():
+            kt = k.split()
+            if len(kt) < 2 or kt[-1] != last:
+                continue
+            k_first = kt[0]
+            if q_first.startswith(k_first) or k_first.startswith(q_first):
+                prefix_candidates.append(v)
+        if len(prefix_candidates) == 1:
+            return prefix_candidates[0]
 
     return None
 
