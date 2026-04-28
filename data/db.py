@@ -1,6 +1,8 @@
 """
 data/db.py — SQLite database manager for UFC Matchmaker
 """
+from __future__ import annotations
+
 import sqlite3
 import logging
 from pathlib import Path

@@ -31,7 +31,7 @@ from typing import Optional
 import numpy as np
 
 from data.db import Database
-from models.feature_engineering import build_matchup_vector
+from models.feature_engineering import build_full_matchup_vector
 from models.fight_quality_nn import FightQualityNN
 from models.training import load_model, load_scaler
 from config import NN, WEIGHT_CLASSES
@@ -300,9 +300,9 @@ class Matchmaker:
           4. Computing business overlay
           5. Blending and computing sub-scores for display
         """
-        # ── Feature vector (average of both orderings for symmetry) ──────────
-        vec_ab = build_matchup_vector(fa.raw, fb.raw)
-        vec_ba = build_matchup_vector(fb.raw, fa.raw)
+        # ── Feature vector: 72-dim = fA(24) + fB(24) + cross(24), symmetric avg
+        vec_ab = build_full_matchup_vector(fa.raw, fb.raw)
+        vec_ba = build_full_matchup_vector(fb.raw, fa.raw)
         vec    = ((vec_ab + vec_ba) / 2.0).reshape(1, -1)
 
         # Scale using the fitted scaler
@@ -572,6 +572,46 @@ class HeuristicMatchmaker:
 
     def __init__(self, db: Database):
         self.db = db
+
+    def predict_specific_matchup(
+        self,
+        fighter_a_name: str,
+        fighter_b_name: str,
+    ) -> Optional[MatchupResult]:
+        """Score one named pairing using the same heuristic as predict_weight_class."""
+        fa_row = self._get_fighter_by_name(fighter_a_name)
+        fb_row = self._get_fighter_by_name(fighter_b_name)
+        if fa_row is None or fb_row is None:
+            return None
+        fa = FighterProfile.from_db_row(fa_row)
+        fb = FighterProfile.from_db_row(fb_row)
+        score = self._heuristic_score(fa, fb)
+        gr_a = fa.raw.get("grapple_ratio") or 0.3
+        gr_b = fb.raw.get("grapple_ratio") or 0.3
+        return MatchupResult(
+            fighter_a=fa,
+            fighter_b=fb,
+            nn_score=score,
+            business_score=score,
+            final_score=score,
+            style_clash=min(abs(gr_a - gr_b) * 2.0, 1.0),
+            finish_probability=min((fa.finish_rate * fb.finish_rate) ** 0.5 * 1.5, 1.0),
+            competitive_balance=0.5,
+            action_density=min(((fa.sig_strikes_pm or 3) + (fb.sig_strikes_pm or 3)) / 12, 1),
+            title_implications=(
+                fa.ranking is not None and fa.ranking <= 5
+                and fb.ranking is not None and fb.ranking <= 5
+            ),
+            narrative=f"Heuristic matchup: {fa.name} vs {fb.name}",
+        )
+
+    def _get_fighter_by_name(self, name: str) -> Optional[dict]:
+        with self.db.connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM fighters WHERE LOWER(name) = LOWER(?)",
+                (name,),
+            ).fetchone()
+            return dict(row) if row else None
 
     def predict_weight_class(
         self,

@@ -3,7 +3,7 @@ models/fight_quality_nn.py
 PyTorch Neural Network for predicting Fight Quality Score.
 
 Architecture: Deep MLP with residual connections, batch norm, and dropout.
-Input:  48-dim matchup feature vector (24 per fighter)
+Input:  72-dim matchup vector (24 fighter A + 24 fighter B + 24 cross-features)
 Output: 1 scalar — predicted Fight Quality Score (0–100)
 """
 import logging
@@ -39,7 +39,7 @@ class FightQualityNN(nn.Module):
     """
     Deep MLP for fight quality prediction.
 
-    Input:   48-dimensional matchup feature vector
+    Input:   72-dimensional matchup feature vector (includes cross-fighter features)
     Output:  1 scalar (0-100 quality score)
 
     Architecture:
@@ -50,7 +50,7 @@ class FightQualityNN(nn.Module):
 
     def __init__(
         self,
-        input_dim: int = 48,
+        input_dim: int = 72,
         hidden_layers: list[int] = None,
         dropout: float = 0.3,
     ):
@@ -90,7 +90,7 @@ class FightQualityNN(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
-            x: (batch, 48) float32 tensor
+            x: (batch, 72) float32 tensor
         Returns:
             (batch, 1) float32 tensor in [0, 1] (multiply by 100 for score)
         """

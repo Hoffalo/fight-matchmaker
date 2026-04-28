@@ -40,16 +40,15 @@ def _load_fighters(db: Database) -> dict[int, dict]:
 def _build_event_fights(
     db: Database,
     fighters: dict[int, dict],
-    use_72_dim: bool = False,
+    use_72_dim: bool = True,
 ) -> list[dict]:
     """
     Return every usable fight as a dict with feature vector + metadata.
 
     Parameters
     ----------
-    use_72_dim : if True, uses build_full_matchup_vector (72 features)
-                 for compatibility with the binary classifier pipeline.
-                 Defaults to False (48-dim) for backward compatibility.
+    use_72_dim : if True (default), uses build_full_matchup_vector (72 features).
+                 Set False only for legacy 48-dim experiments.
     """
     vector_fn = build_full_matchup_vector if use_72_dim else build_matchup_vector
 
@@ -124,7 +123,7 @@ def backtest(
     random_state: int = 42,
     model=None,
     scaler: StandardScaler | None = None,
-    use_72_dim: bool = False,
+    use_72_dim: bool = True,
 ) -> dict:
     """
     Time-respecting backtest: train on everything strictly before

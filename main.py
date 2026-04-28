@@ -9,16 +9,17 @@ Run `python main.py --help` to see available commands.
 Commands
 ────────
   collect   — Run the full data scraping pipeline
-  train     — Train the Fight Quality Neural Network
-  predict   — Generate matchup predictions for a weight class
+  train     — Train FightQualityNN on 72-dim features (bonus labels)
+  predict   — Rank matchups by model score or heuristic
   matchup   — Score one specific named fighter pairing
   card      — Build a suggested full event card
   stats     — Show current database record counts
-  evaluate  — Evaluate a trained model on the full dataset
+  evaluate  — Evaluate trained NN on stored regression targets
+  pca       — PCA variance breakdown on scaled 72-dim training features
+  seed-db   — Create minimal SQLite DB for offline PCA/tests (no scraping)
   demo      — Run with synthetic demo data (no scraping needed)
 ═══════════════════════════════════════════════════════════════════════════════
 """
-import sys
 import logging
 from pathlib import Path
 from typing import Optional
@@ -35,8 +36,8 @@ app     = typer.Typer(
     name="ufc-matchmaker",
     help=(
         "AI-powered UFC fight pairing predictor.\n\n"
-        "Scrapes fighter and fight data, trains a Neural Network on fight quality,\n"
-        "and predicts the most entertaining / commercially successful matchups."
+        "Scrapes fighter data, trains a 72-feature model (fighter stats + matchup "
+        "cross-features), and ranks matchups by predicted entertainment value."
     ),
     add_completion=False,
     rich_markup_mode="rich",
@@ -99,13 +100,12 @@ def train(
     verbose: bool = typer.Option(False, "--verbose", "-v"),
 ):
     """
-    [bold]Train the Fight Quality Neural Network.[/bold]
+    [bold]Train the FightQualityNN regression head on bonus-label targets.[/bold]
 
-    Requires the database to have fight records with computed quality scores.
-    Run [cyan]collect[/cyan] first.
+    Uses 72-dimensional vectors (24 + 24 fighter features + 24 matchup cross-features).
+    Requires populated fights and fighters in the DB — run [cyan]collect[/cyan] first.
 
-    The trained model is saved to [dim]models/fight_quality_nn.pt[/dim].
-    A feature scaler is saved to [dim]models/feature_scaler.pkl[/dim].
+    Checkpoint and scaler paths come from [dim]config.NN[/dim] (defaults under [dim]models/[/dim]).
     """
     setup_logging("DEBUG" if verbose else "INFO",
                   log_file=str(BASE_DIR / "logs" / "train.log"))
@@ -147,10 +147,10 @@ def predict(
     """
     [bold]Predict the best matchups for a weight class.[/bold]
 
-    Generates all valid pairings within the division and ranks them by
-    predicted fight quality + business value.
+    Generates pairings and ranks them by NN score blended with business signals,
+    unless [cyan]--heuristic[/cyan] is used (hand-crafted scorer, no checkpoint).
 
-    Requires a trained model unless [cyan]--heuristic[/cyan] is passed.
+    Requires a trained model when heuristic mode is off.
     """
     setup_logging("DEBUG" if verbose else "INFO")
 
@@ -217,16 +217,19 @@ def matchup(
     if heuristic:
         from models.matchmaker import HeuristicMatchmaker
         mm = HeuristicMatchmaker(db)
-        # HeuristicMatchmaker doesn't expose predict_specific_matchup,
-        # so we use the full NN matchmaker path but will fall back
-        pass
+        result = mm.predict_specific_matchup(fighter_a, fighter_b)
+        if result is None:
+            console.print("[red]Could not score matchup. Check fighter names.[/red]")
+            raise typer.Exit(1)
+        print_specific_matchup(result)
+        return
 
     from models.matchmaker import Matchmaker
     try:
         with Matchmaker(db) as mm:
             result = mm.predict_specific_matchup(fighter_a, fighter_b)
         if result is None:
-            console.print(f"[red]Could not score matchup. Check fighter names.[/red]")
+            console.print("[red]Could not score matchup. Check fighter names.[/red]")
             raise typer.Exit(1)
         print_specific_matchup(result)
     except RuntimeError as e:
@@ -448,6 +451,59 @@ def _insert_demo_data(db: Database, weight_class: str):
 
     for f in synthetic_fighters:
         db.upsert_fighter(f)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# seed-db — minimal SQLite for splits / PCA without scraping
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command("seed-db")
+def seed_db(
+    db: Optional[str] = typer.Option(
+        None,
+        "--db",
+        help="Database path (default: data/ufc_matchmaker.db)",
+    ),
+):
+    """
+    [bold]Create a minimal database[/bold] with train/val/test fights so
+    [cyan]pca[/cyan] and modelling commands can run without [cyan]collect[/cyan].
+
+    Overwrites existing rows in that file — use a copy if you need to preserve data.
+    """
+    from data.seed_minimal_splits_db import seed
+
+    path = seed(db_path=db)
+    console.print(f"[green]Seeded minimal database:[/green] {path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pca — dimensionality analysis (scaled 72-dim features)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command()
+def pca(
+    db: Optional[str] = typer.Option(
+        None,
+        "--db",
+        help="Path to ufc_matchmaker.db (default: data/ufc_matchmaker.db)",
+    ),
+):
+    """
+    [bold]PCA on training features[/bold] — cumulative variance and PC1 loadings.
+
+    Requires the canonical database used for modelling. Useful for assessing
+    redundancy across the 72 engineered dimensions.
+    """
+    from models.pca_analysis import format_pca_report, run_pca_from_db
+
+    path = db or str(Path(__file__).resolve().parent / "data" / "ufc_matchmaker.db")
+    try:
+        result = run_pca_from_db(db_path=path)
+        console.print(format_pca_report(result))
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+        raise typer.Exit(1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

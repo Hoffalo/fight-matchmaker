@@ -15,7 +15,8 @@ inference time the matchmaker scores ALL possible pairings and ranks them — so
 the model's ability to produce a well-ordered ranking matters as much as its
 ability to classify individual fights.
 
-Temporal split: train = pre-2023, val = 2023, test = 2024+.
+Temporal split is defined in models/data_splits.py and models/data_loader.py
+(train / val / test by event_date — see TRAIN_CUTOFF / VAL_CUTOFF).
 """
 import logging
 from typing import Optional

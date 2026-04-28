@@ -117,7 +117,8 @@ def print_matchup_report(
     )
     console.print(
         f"  [dim]Top {len(results)} predicted matchups   "
-        f"NN weight: 70% | Business weight: 30%[/dim]"
+        f"72 features (including matchup cross-features)   "
+        f"model blend: 70% NN score | 30% business overlay[/dim]"
     )
     console.print()
 
@@ -399,8 +400,10 @@ def print_db_stats(stats: dict):
 
 def print_training_eval(metrics: dict):
     """
-    Print model evaluation metrics after training.
-    Shows MAE, RMSE, and R² in a clean panel.
+    Print regression metrics after FightQualityNN training (fight-quality targets).
+
+    Displays MAE, RMSE, and R² on the 0–100 scale — applies when training.py's
+    regression loop has run successfully.
     """
     console.print()
 

@@ -8,6 +8,8 @@ env/
 logs/
 # data/*.db
 data/*.sqlite
+*.db-wal
+*.db-shm
 *.pt
 *.pkl
 *.joblib

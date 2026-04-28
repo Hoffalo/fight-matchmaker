@@ -3,9 +3,9 @@ models/feature_engineering.py
 Feature extraction for the fight quality Neural Network.
 
 Two levels of features:
-  1. Fighter features  — career stats, style, physical attributes (24 features)
-  2. Matchup features  — cross-fighter signals, style clash, balance (24 features)
-  → Total input vector: 48 features
+  1. Fighter features  — career stats, style, physical attributes (24 per fighter)
+  2. Matchup features  — cross-fighter signals, style clash, balance (24)
+  → Full input vector: 72 features (24 + 24 + 24) via build_full_matchup_vector()
 
 Fight Quality Score target is computed from historical fight outcomes.
 """
