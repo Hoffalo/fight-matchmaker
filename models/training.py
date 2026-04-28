@@ -4,21 +4,19 @@ models/training.py
 Training pipeline for the FightQualityNN.
 
 Flow:
-  1. Load all historical fights with computed quality scores from the DB
-  2. Build (fighter_A_features || fighter_B_features) input vectors
-  3. Use the fight_quality_score column as the regression target
-  4. Train with MSE loss + L2 regularisation (weight_decay)
-  5. Early-stopping on validation loss
-  6. Save best model weights + feature scaler to disk
+  1. Load raw fight pairs from the DB (temporal_split in data_splits.py)
+  2. Augment with both (A, B) and (B, A) orderings inside each split only
+  3. Build FEATURE_DIM-wide vectors (115 by default) via build_full_matchup_vector:
+     career blocks, matchup cross-features, odds, context, rolling fight_stats
+  4. Targets: binary bonus-fight labels (FOTN/POTN), 0.0 or 1.0
+  5. Fit StandardScaler on train; train with Huber loss + AdamW (weight_decay)
+  6. Early-stopping on validation loss; save best weights + scaler
 
 Why both orderings?
-  A fight between Fighter X and Fighter Y is the same fight regardless of which
-  corner they were in. We therefore add BOTH (A, B) and (B, A) vectors pointing
-  at the same target score — this doubles the training set and teaches the model
-  that matchup quality is symmetric.
+  A fight is the same regardless of corner order. Both (A, B) and (B, A) rows
+  share the same label and fight_id so splits never leak across partitions.
 
-Targets are normalised to [0, 1] for the Sigmoid output head, then multiplied
-by 100 when producing human-readable scores.
+The network ends with Sigmoid → [0, 1]; predict_batch multiplies by 100 for UI.
 ═══════════════════════════════════════════════════════════════════════════════
 """
 import logging
@@ -87,11 +85,9 @@ def build_classification_dataset(
     return X, y, meta
 
 
-# For the 115-dim classification pipeline (XGBoost, RF, FightBonusNN),
-# use models.data_loader.get_canonical_splits() which delegates to
-# data_splits.temporal_split(use_72_dim=True).
-# The old build_classification_dataset_72() has been removed — data_loader
-# is now the single canonical entry point for 115-dim data.
+# For the classification pipeline (XGBoost, RF, FightBonusNN),
+# use models.data_loader.get_canonical_splits() (temporal split + scaling).
+# data_loader is the canonical entry point for FEATURE_DIM-wide matrices.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

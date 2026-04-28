@@ -6,8 +6,8 @@ Delegates to the split/augmentation infrastructure in data_splits.py (Mattheus's
 M1/M2/M3 work) while using 115-dim feature vectors with matchup cross-features,
 odds, context, and rolling fight_stats features (build_full_matchup_vector).
 
-This module is the single entry point for all classification models
-(baselines.py, nn_binary.py, matchmaker_v2.py).
+This module is the single entry point for classification models
+(baselines.py, nn_binary.py).
 
 Usage
 -----
@@ -227,6 +227,8 @@ def load_real_data(
 ) -> dict:
     """
     Load fight data from SQLite — delegates to get_canonical_splits().
+
+    Backward-compatible entry point for baselines.py and nn_binary.py.
     """
     return get_canonical_splits(
         db_path=db_path,
