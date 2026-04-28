@@ -1,19 +1,24 @@
 # M4 + M5 — Calibration & Spearman Analysis
 
-**Test set:** Jan 2026+ (103 fights, 52 positives, 25.2% bonus rate)
+**Test set:** Jan 2026+ (103 fights, 26 positives, 25.2% bonus rate)
 
 *All numbers below are on the held-out test set, which was never seen during training, validation, or hyperparameter tuning.*
 
+**Best model (by per-event ρ): XGBoost (tuned)**
+
+- Global Spearman ρ: **+0.147**
+- Per-event mean ρ: **+0.139** (across 8 held-out cards)
+- Top-1 hit rate: **50%**
+- Brier: 0.237  ·  ECE: 0.222
+
 ## Model Comparison
 
-| Model | Brier ↓ | ECE ↓ | Spearman ρ ↑ | Per-event mean rank ↓ | Random baseline | Top-1 hit ↑ |
-|-------|---------|-------|--------------|------------------------|-----------------|-------------|
-| Logistic Regression | 0.440 | 0.436 | 0.081 | 6.69 | 6.94 | 12.50% |
-| Random Forest | 0.251 | 0.244 | 0.075 | 6.54 | 6.94 | 12.50% |
-
-## Skipped models
-
-- **XGBoost** — XGBoostError: 
+| Model | Brier ↓ | ECE ↓ | Global ρ ↑ | Per-event mean ρ ↑ | Mean bonus rank ↓ | Random baseline | Top-1 hit ↑ |
+|-------|---------|-------|------------|--------------------|--------------------|-----------------|-------------|
+| Logistic Regression | 0.479 | 0.464 | +0.083 | +0.072 | 6.64 | 6.94 | 12% |
+| Random Forest (tuned) | 0.271 | 0.287 | +0.121 | +0.087 | 6.42 | 6.94 | 25% |
+| XGBoost (tuned) ★ | 0.237 | 0.222 | +0.147 | +0.139 | 5.99 | 6.94 | 50% |
+| Neural Net (12→16→1) | 0.281 | 0.244 | -0.039 | -0.030 | 7.02 | 6.94 | 12% |
 
 ## Interpretation
 

@@ -276,6 +276,7 @@ def spearman_metrics(
     all_mean_ranks: list[float] = []
     all_random_baseline: list[float] = []
     all_top1_hit: list[int] = []
+    all_event_rhos: list[float] = []
 
     for eid in np.unique(real_event_ids):
         if eid < 0:
@@ -295,13 +296,20 @@ def spearman_metrics(
         random_baseline = (n + 1) / 2
         top1_hit = int(1 in bonus_ranks)
 
+        # Per-event Spearman ρ between probability ranking and binary label.
+        # Constant-arm guard already passed above (n_pos in [1, n-1]).
+        ev_rho, _ = spearmanr(yp, yt)
+        ev_rho = float(ev_rho) if not np.isnan(ev_rho) else 0.0
+
         all_mean_ranks.append(mean_rank)
         all_random_baseline.append(random_baseline)
         all_top1_hit.append(top1_hit)
+        all_event_rhos.append(ev_rho)
         per_event["events"].append({
             "event_id":         int(eid),
             "n_fights":         n,
             "n_bonus":          n_pos,
+            "spearman_rho":     ev_rho,
             "bonus_mean_rank":  mean_rank,
             "random_baseline":  random_baseline,
             "top1_was_bonus":   bool(top1_hit),
@@ -310,12 +318,91 @@ def spearman_metrics(
     if all_mean_ranks:
         per_event["summary"] = {
             "n_events":             len(all_mean_ranks),
+            "mean_event_rho":       float(np.mean(all_event_rhos)),
             "mean_bonus_rank":      float(np.mean(all_mean_ranks)),
             "mean_random_baseline": float(np.mean(all_random_baseline)),
             "top1_hit_rate":        float(np.mean(all_top1_hit)),
         }
 
     return {"overall": overall, "per_event": per_event}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-event Spearman bar chart  +  best-model calibration close-up
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_per_event_spearman(
+    result: dict,
+    save_path: Path,
+    db_path: str = "data/ufc_matchmaker.db",
+) -> None:
+    """One bar per held-out UFC card; sorted by ρ; reference line at 0."""
+    import matplotlib.pyplot as plt
+    import sqlite3
+
+    events = result["spearman"]["per_event"].get("events", [])
+    if not events:
+        logger.warning("No per-event data for %s; skipping bar chart", result["label"])
+        return
+
+    # Look up event names for labels
+    conn = sqlite3.connect(db_path)
+    eids = [e["event_id"] for e in events]
+    placeholders = ",".join("?" for _ in eids)
+    name_lookup = {
+        eid: name for eid, name in conn.execute(
+            f"SELECT id, name FROM events WHERE id IN ({placeholders})", eids,
+        ).fetchall()
+    }
+    conn.close()
+
+    events_sorted = sorted(events, key=lambda e: e["spearman_rho"])
+    rhos   = [e["spearman_rho"] for e in events_sorted]
+    labels = [
+        (name_lookup.get(e["event_id"], f"Event #{e['event_id']}"))[:35] +
+        f"\n(n={e['n_fights']}, b={e['n_bonus']})"
+        for e in events_sorted
+    ]
+    colors = ["#2ca02c" if r > 0 else "#d62728" if r < 0 else "#7f7f7f" for r in rhos]
+
+    fig, ax = plt.subplots(figsize=(11, max(4, 0.35 * len(rhos))))
+    ax.barh(range(len(rhos)), rhos, color=colors, edgecolor="black", linewidth=0.5)
+    ax.set_yticks(range(len(rhos)))
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.axvline(0, color="black", linewidth=0.8)
+
+    summary = result["spearman"]["per_event"].get("summary", {})
+    mean_rho = summary.get("mean_event_rho", 0.0)
+    ax.axvline(mean_rho, color="C0", linewidth=1.5, linestyle="--",
+               label=f"mean ρ = {mean_rho:+.3f}")
+
+    ax.set_xlabel("Spearman ρ (within event)")
+    ax.set_title(
+        f"{result['label']} — per-event rank correlation\n"
+        f"global ρ = {result['spearman']['overall']['spearman_rho']:+.3f}  "
+        f"|  per-event mean ρ = {mean_rho:+.3f}  "
+        f"|  top-1 hit = {summary.get('top1_hit_rate', 0):.0%}"
+    )
+    ax.legend(loc="lower right")
+    ax.grid(axis="x", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(save_path, dpi=150)
+    plt.close(fig)
+    logger.info("Saved %s", save_path)
+
+
+def pick_best_model(results: list[dict]) -> dict | None:
+    """
+    Pick the model that maximises per-event mean Spearman ρ — the
+    matchmaker's actual objective. Falls back to global ρ if no
+    per-event summary is available.
+    """
+    if not results:
+        return None
+    def _score(r):
+        s = r["spearman"]["per_event"].get("summary", {})
+        return s.get("mean_event_rho", r["spearman"]["overall"]["spearman_rho"] or -1)
+    return max(results, key=_score)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -403,7 +490,109 @@ def run_eval(
     return summary
 
 
-def _format_markdown(results: list[dict], skipped: list[dict], data_summary: dict) -> str:
+# ─────────────────────────────────────────────────────────────────────────────
+# Entry point: evaluate from precomputed test predictions (Raji's npz)
+# ─────────────────────────────────────────────────────────────────────────────
+
+NPZ_MODEL_LABELS = {
+    "logreg_y_proba":  "Logistic Regression",
+    "rf_y_proba":      "Random Forest (tuned)",
+    "xgb_y_proba":     "XGBoost (tuned)",
+    "nn_y_proba":      "Neural Net (12→16→1)",
+}
+
+
+def run_eval_from_npz(
+    npz_path: str,
+    db_path: str = "data/ufc_matchmaker.db",
+    n_bins: int = 10,
+) -> dict:
+    """
+    Load test-set predictions from a precomputed .npz (Raji's checkpoint
+    output) and run M4 + M5 against the actual tuned models.
+
+    The .npz must contain ``y_true`` and one or more of the keys in
+    NPZ_MODEL_LABELS (``logreg_y_proba``, ``rf_y_proba``, ``xgb_y_proba``,
+    ``nn_y_proba``). Row ordering must match get_canonical_splits()'s test
+    split — verified at runtime against the local pipeline.
+    """
+    OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    npz = np.load(npz_path)
+    y_true = npz["y_true"].astype(np.float32)
+
+    # Verify ordering matches our local pipeline so fight_id lookup works
+    from data.db import Database
+    from models.data_splits import (
+        build_raw_pairs, temporal_split_raw, augment_pair, build_full_matchup_vector,
+    )
+    raw = build_raw_pairs(Database(db_path))
+    _, _, raw_test = temporal_split_raw(raw)
+    _, y_test_local, meta_test = augment_pair(raw_test, vector_fn=build_full_matchup_vector)
+
+    if not np.array_equal(y_true, y_test_local.astype(np.float32)):
+        raise ValueError(
+            "y_true in npz does not match the local test split. "
+            "Row ordering is required to match get_canonical_splits()."
+        )
+    test_fight_ids = meta_test["fight_id"]
+
+    # Build a results entry per available model
+    results: list[dict] = []
+    for key, label in NPZ_MODEL_LABELS.items():
+        if key not in npz.files:
+            logger.info("Skipping %s — %s not in npz", label, key)
+            continue
+        y_proba = npz[key].astype(np.float64)
+        cal = calibration_metrics(y_true, y_proba, n_bins=n_bins)
+        spr = spearman_metrics(y_true, y_proba, fight_ids=test_fight_ids, db_path=db_path)
+        result = {
+            "key":         key.replace("_y_proba", ""),
+            "label":       label,
+            "calibration": cal,
+            "spearman":    spr,
+        }
+        results.append(result)
+        plot_calibration_one(result, OUTPUTS_DIR / f"calibration_{result['key']}.png")
+        plot_per_event_spearman(result, OUTPUTS_DIR / f"spearman_per_event_{result['key']}.png", db_path=db_path)
+
+    if results:
+        plot_calibration_all(results, OUTPUTS_DIR / "calibration_curves.png")
+
+    # Best-model dedicated outputs (slide 11 placeholders)
+    best = pick_best_model(results)
+    if best is not None:
+        plot_calibration_one(best, OUTPUTS_DIR / "calibration_best.png")
+        plot_per_event_spearman(best, OUTPUTS_DIR / "spearman_per_event_best.png", db_path=db_path)
+        logger.info("Best model = %s (per-event mean ρ = %.3f)",
+                    best["label"],
+                    best["spearman"]["per_event"].get("summary", {}).get("mean_event_rho", 0.0))
+
+    # Test-set summary for the markdown header
+    n_pos = int(y_true.sum()); n_total = len(y_true)
+    data_summary = {
+        "test": {
+            "fights":  n_total // 2,  # accounting for (A,B)/(B,A) augmentation
+            "rows":    n_total,
+            "pos":     n_pos // 2,
+            "pos_pct": 100.0 * n_pos / max(n_total, 1),
+        }
+    }
+
+    md_path = OUTPUTS_DIR / "spearman_analysis.md"
+    md_path.write_text(_format_markdown(results, [], data_summary, best=best))
+    logger.info("Saved %s", md_path)
+
+    json_path = OUTPUTS_DIR / "eval_summary.json"
+    json_path.write_text(json.dumps(
+        {"models": results, "best": best["key"] if best else None, "data": data_summary},
+        indent=2, default=str,
+    ))
+    logger.info("Saved %s", json_path)
+    return {"models": results, "best": best, "data": data_summary}
+
+
+def _format_markdown(results: list[dict], skipped: list[dict], data_summary: dict, best: dict | None = None) -> str:
     test = data_summary.get("test", {})
     lines = [
         "# M4 + M5 — Calibration & Spearman Analysis",
@@ -414,26 +603,46 @@ def _format_markdown(results: list[dict], skipped: list[dict], data_summary: dic
         "*All numbers below are on the held-out test set, which was never seen "
         "during training, validation, or hyperparameter tuning.*",
         "",
+    ]
+    if best is not None:
+        bsum = best["spearman"]["per_event"].get("summary", {})
+        lines += [
+            f"**Best model (by per-event ρ): {best['label']}**",
+            "",
+            f"- Global Spearman ρ: **{best['spearman']['overall']['spearman_rho']:+.3f}**",
+            f"- Per-event mean ρ: **{bsum.get('mean_event_rho', 0):+.3f}** "
+            f"(across {bsum.get('n_events', 0)} held-out cards)",
+            f"- Top-1 hit rate: **{bsum.get('top1_hit_rate', 0):.0%}**",
+            f"- Brier: {best['calibration']['brier']:.3f}  ·  ECE: {best['calibration']['ece']:.3f}",
+            "",
+        ]
+    lines += [
         "## Model Comparison",
         "",
-        "| Model | Brier ↓ | ECE ↓ | Spearman ρ ↑ | Per-event mean rank ↓ | Random baseline | Top-1 hit ↑ |",
-        "|-------|---------|-------|--------------|------------------------|-----------------|-------------|",
+        "| Model | Brier ↓ | ECE ↓ | Global ρ ↑ | Per-event mean ρ ↑ | Mean bonus rank ↓ | Random baseline | Top-1 hit ↑ |",
+        "|-------|---------|-------|------------|--------------------|--------------------|-----------------|-------------|",
     ]
     for r in results:
         cal = r["calibration"]
         spr = r["spearman"]
         rho = spr["overall"]["spearman_rho"]
-        rho_s = f"{rho:.3f}" if rho is not None else "n/a"
+        rho_s = f"{rho:+.3f}" if rho is not None else "n/a"
         pev = spr["per_event"].get("summary", {})
+        ev_rho = pev.get("mean_event_rho")
         mr  = pev.get("mean_bonus_rank")
         rb  = pev.get("mean_random_baseline")
         t1  = pev.get("top1_hit_rate")
-        lines.append(
-            f"| {r['label']} | {cal['brier']:.3f} | {cal['ece']:.3f} | {rho_s} | "
-            f"{mr:.2f} | {rb:.2f} | {t1:.2%} |"
-            if mr is not None else
-            f"| {r['label']} | {cal['brier']:.3f} | {cal['ece']:.3f} | {rho_s} | n/a | n/a | n/a |"
-        )
+        marker = " ★" if best and r is best else ""
+        if ev_rho is not None:
+            lines.append(
+                f"| {r['label']}{marker} | {cal['brier']:.3f} | {cal['ece']:.3f} | "
+                f"{rho_s} | {ev_rho:+.3f} | {mr:.2f} | {rb:.2f} | {t1:.0%} |"
+            )
+        else:
+            lines.append(
+                f"| {r['label']}{marker} | {cal['brier']:.3f} | {cal['ece']:.3f} | "
+                f"{rho_s} | n/a | n/a | n/a | n/a |"
+            )
 
     if skipped:
         lines += ["", "## Skipped models", ""]
@@ -469,11 +678,17 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s  %(levelname)-7s %(message)s")
     parser = argparse.ArgumentParser(description="M4 (calibration) + M5 (Spearman)")
     parser.add_argument("--models", nargs="+", default=None,
-                        help="Subset of model keys to run: logreg, rf, xgb")
+                        help="Subset of model keys to run when training fresh: logreg, rf, xgb")
     parser.add_argument("--db", default="data/ufc_matchmaker.db")
     parser.add_argument("--bins", type=int, default=10)
+    parser.add_argument("--npz", default=None,
+                        help="Path to a precomputed test-predictions npz "
+                             "(skips training; loads y_proba per model from disk).")
     args = parser.parse_args()
-    run_eval(model_keys=args.models, db_path=args.db, n_bins=args.bins)
+    if args.npz:
+        run_eval_from_npz(args.npz, db_path=args.db, n_bins=args.bins)
+    else:
+        run_eval(model_keys=args.models, db_path=args.db, n_bins=args.bins)
 
 
 if __name__ == "__main__":

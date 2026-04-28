@@ -4,37 +4,37 @@
       "key": "logreg",
       "label": "Logistic Regression",
       "calibration": {
-        "brier": 0.43958962874678054,
-        "ece": 0.4360316998427804,
+        "brier": 0.4786947007072314,
+        "ece": 0.4636442597132509,
         "prob_true_per_bin": [
-          0.19047619047619047,
           0.09523809523809523,
-          0.1,
-          0.38461538461538464,
-          0.25,
+          0.09523809523809523,
           0.3,
+          0.2857142857142857,
+          0.3076923076923077,
+          0.19047619047619047,
+          0.5,
+          0.45454545454545453,
           0.3,
-          0.47619047619047616,
-          0.3,
-          0.09523809523809523
+          0.0
         ],
         "prob_pred_per_bin": [
-          0.0001095988793770575,
-          0.02177469506454682,
-          0.22278312359278934,
-          0.4776431827288365,
-          0.6788221947650528,
-          0.9376174658300258,
-          0.9959722080075972,
-          0.999869424802824,
-          0.9999892934115954,
-          0.99999945420975
+          0.0019666581276974867,
+          0.100389410569499,
+          0.42918278500096907,
+          0.6270510393453604,
+          0.9033245731679952,
+          0.9858105707961616,
+          0.9995720706563604,
+          0.9999907803336725,
+          0.999998108023123,
+          0.9999999951450667
         ]
       },
       "spearman": {
         "overall": {
-          "spearman_rho": 0.08081390098253878,
-          "p_value": 0.4170840909842741,
+          "spearman_rho": 0.08307008512994427,
+          "p_value": 0.40415508579564696,
           "n_fights": 103
         },
         "per_event": {
@@ -43,7 +43,8 @@
               "event_id": 1,
               "n_fights": 13,
               "n_bonus": 3,
-              "bonus_mean_rank": 6.333333333333333,
+              "spearman_rho": 0.24397501823713327,
+              "bonus_mean_rank": 5.333333333333333,
               "random_baseline": 7.0,
               "top1_was_bonus": false
             },
@@ -51,7 +52,8 @@
               "event_id": 2,
               "n_fights": 14,
               "n_bonus": 3,
-              "bonus_mean_rank": 8.666666666666666,
+              "spearman_rho": -0.23750843439814176,
+              "bonus_mean_rank": 9.333333333333334,
               "random_baseline": 7.5,
               "top1_was_bonus": false
             },
@@ -59,7 +61,8 @@
               "event_id": 3,
               "n_fights": 12,
               "n_bonus": 4,
-              "bonus_mean_rank": 5.0,
+              "spearman_rho": 0.2560457782495946,
+              "bonus_mean_rank": 5.25,
               "random_baseline": 6.5,
               "top1_was_bonus": false
             },
@@ -67,7 +70,8 @@
               "event_id": 4,
               "n_fights": 13,
               "n_bonus": 3,
-              "bonus_mean_rank": 5.666666666666667,
+              "spearman_rho": 0.14719601443879746,
+              "bonus_mean_rank": 6.0,
               "random_baseline": 7.0,
               "top1_was_bonus": false
             },
@@ -75,6 +79,7 @@
               "event_id": 5,
               "n_fights": 14,
               "n_bonus": 4,
+              "spearman_rho": 0.15689290811054726,
               "bonus_mean_rank": 6.5,
               "random_baseline": 7.5,
               "top1_was_bonus": false
@@ -83,6 +88,7 @@
               "event_id": 6,
               "n_fights": 13,
               "n_bonus": 3,
+              "spearman_rho": 0.0,
               "bonus_mean_rank": 7.0,
               "random_baseline": 7.0,
               "top1_was_bonus": false
@@ -91,7 +97,8 @@
               "event_id": 7,
               "n_fights": 13,
               "n_bonus": 3,
-              "bonus_mean_rank": 11.0,
+              "spearman_rho": -0.3434573670238607,
+              "bonus_mean_rank": 9.333333333333334,
               "random_baseline": 7.0,
               "top1_was_bonus": false
             },
@@ -99,14 +106,16 @@
               "event_id": 8,
               "n_fights": 11,
               "n_bonus": 3,
-              "bonus_mean_rank": 3.3333333333333335,
+              "spearman_rho": 0.3558331060921286,
+              "bonus_mean_rank": 4.333333333333333,
               "random_baseline": 6.0,
               "top1_was_bonus": true
             }
           ],
           "summary": {
             "n_events": 8,
-            "mean_bonus_rank": 6.6875,
+            "mean_event_rho": 0.07237212796327484,
+            "mean_bonus_rank": 6.635416666666667,
             "mean_random_baseline": 6.9375,
             "top1_hit_rate": 0.125
           }
@@ -115,39 +124,39 @@
     },
     {
       "key": "rf",
-      "label": "Random Forest",
+      "label": "Random Forest (tuned)",
       "calibration": {
-        "brier": 0.25090073050721523,
-        "ece": 0.24431989814820024,
+        "brier": 0.270807631674793,
+        "ece": 0.28668763169369277,
         "prob_true_per_bin": [
           0.19047619047619047,
-          0.23809523809523808,
+          0.2857142857142857,
           0.2,
-          0.19047619047619047,
-          0.25,
-          0.3333333333333333,
-          0.25,
-          0.19047619047619047,
+          0.07692307692307693,
+          0.2727272727272727,
+          0.14285714285714285,
+          0.2,
+          0.47619047619047616,
           0.4,
           0.2857142857142857
         ],
         "prob_pred_per_bin": [
-          0.3244236351365012,
-          0.3990454329244664,
-          0.4356819533052838,
-          0.4715667079721471,
-          0.5054175001151929,
-          0.5221212639481223,
-          0.5426583466078132,
-          0.5581246355521758,
-          0.5917627496486667,
-          0.6208844208946879
+          0.3828713323759663,
+          0.44674723312693143,
+          0.48549329970229466,
+          0.5162187400824366,
+          0.533845500684506,
+          0.5510147214483496,
+          0.5823470338309609,
+          0.6052231618191405,
+          0.6404043386858073,
+          0.6609804090342416
         ]
       },
       "spearman": {
         "overall": {
-          "spearman_rho": 0.07517592828784261,
-          "p_value": 0.4504230380895112,
+          "spearman_rho": 0.1207027845779428,
+          "p_value": 0.22455863919591879,
           "n_fights": 103
         },
         "per_event": {
@@ -156,7 +165,8 @@
               "event_id": 1,
               "n_fights": 13,
               "n_bonus": 3,
-              "bonus_mean_rank": 7.333333333333333,
+              "spearman_rho": 0.14638501094227999,
+              "bonus_mean_rank": 6.0,
               "random_baseline": 7.0,
               "top1_was_bonus": false
             },
@@ -164,7 +174,8 @@
               "event_id": 2,
               "n_fights": 14,
               "n_bonus": 3,
-              "bonus_mean_rank": 6.333333333333333,
+              "spearman_rho": 0.10795837927188262,
+              "bonus_mean_rank": 6.666666666666667,
               "random_baseline": 7.5,
               "top1_was_bonus": false
             },
@@ -172,7 +183,8 @@
               "event_id": 3,
               "n_fights": 12,
               "n_bonus": 4,
-              "bonus_mean_rank": 5.25,
+              "spearman_rho": 0.4103913408340616,
+              "bonus_mean_rank": 4.5,
               "random_baseline": 6.5,
               "top1_was_bonus": true
             },
@@ -180,6 +192,7 @@
               "event_id": 4,
               "n_fights": 13,
               "n_bonus": 3,
+              "spearman_rho": 0.22110132037567368,
               "bonus_mean_rank": 5.666666666666667,
               "random_baseline": 7.0,
               "top1_was_bonus": false
@@ -188,7 +201,8 @@
               "event_id": 5,
               "n_fights": 14,
               "n_bonus": 4,
-              "bonus_mean_rank": 7.75,
+              "spearman_rho": -0.15689290811054726,
+              "bonus_mean_rank": 8.5,
               "random_baseline": 7.5,
               "top1_was_bonus": false
             },
@@ -196,15 +210,17 @@
               "event_id": 6,
               "n_fights": 13,
               "n_bonus": 3,
-              "bonus_mean_rank": 7.0,
+              "spearman_rho": 0.24532669073132907,
+              "bonus_mean_rank": 5.333333333333333,
               "random_baseline": 7.0,
-              "top1_was_bonus": false
+              "top1_was_bonus": true
             },
             {
               "event_id": 7,
               "n_fights": 13,
               "n_bonus": 3,
-              "bonus_mean_rank": 8.0,
+              "spearman_rho": 0.04906533814626581,
+              "bonus_mean_rank": 6.666666666666667,
               "random_baseline": 7.0,
               "top1_was_bonus": false
             },
@@ -212,14 +228,254 @@
               "event_id": 8,
               "n_fights": 11,
               "n_bonus": 3,
-              "bonus_mean_rank": 5.0,
+              "spearman_rho": -0.3257233166544048,
+              "bonus_mean_rank": 8.0,
               "random_baseline": 6.0,
               "top1_was_bonus": false
             }
           ],
           "summary": {
             "n_events": 8,
-            "mean_bonus_rank": 6.541666666666667,
+            "mean_event_rho": 0.08720148194206759,
+            "mean_bonus_rank": 6.416666666666667,
+            "mean_random_baseline": 6.9375,
+            "top1_hit_rate": 0.25
+          }
+        }
+      }
+    },
+    {
+      "key": "xgb",
+      "label": "XGBoost (tuned)",
+      "calibration": {
+        "brier": 0.23688742688187545,
+        "ece": 0.22163837113716067,
+        "prob_true_per_bin": [
+          0.14285714285714285,
+          0.25,
+          0.0,
+          0.5454545454545454,
+          0.0,
+          0.30434782608695654,
+          0.4
+        ],
+        "prob_pred_per_bin": [
+          0.335668397801263,
+          0.36670003831386566,
+          0.40001860531893646,
+          0.41007625514810736,
+          0.42229899391531944,
+          0.5542224379985229,
+          0.6824255108833313
+        ]
+      },
+      "spearman": {
+        "overall": {
+          "spearman_rho": 0.14725288660035946,
+          "p_value": 0.13772425810866307,
+          "n_fights": 103
+        },
+        "per_event": {
+          "events": [
+            {
+              "event_id": 1,
+              "n_fights": 13,
+              "n_bonus": 3,
+              "spearman_rho": 0.12584993693951663,
+              "bonus_mean_rank": 7.0,
+              "random_baseline": 7.0,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 2,
+              "n_fights": 14,
+              "n_bonus": 3,
+              "spearman_rho": 0.6557251176944725,
+              "bonus_mean_rank": 2.3333333333333335,
+              "random_baseline": 7.5,
+              "top1_was_bonus": true
+            },
+            {
+              "event_id": 3,
+              "n_fights": 12,
+              "n_bonus": 4,
+              "spearman_rho": 0.3609974361905777,
+              "bonus_mean_rank": 4.75,
+              "random_baseline": 6.5,
+              "top1_was_bonus": true
+            },
+            {
+              "event_id": 4,
+              "n_fights": 13,
+              "n_bonus": 3,
+              "spearman_rho": -0.21218304602782243,
+              "bonus_mean_rank": 8.0,
+              "random_baseline": 7.0,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 5,
+              "n_fights": 14,
+              "n_bonus": 4,
+              "spearman_rho": 0.0,
+              "bonus_mean_rank": 6.5,
+              "random_baseline": 7.5,
+              "top1_was_bonus": true
+            },
+            {
+              "event_id": 6,
+              "n_fights": 13,
+              "n_bonus": 3,
+              "spearman_rho": 0.07710461692544432,
+              "bonus_mean_rank": 6.0,
+              "random_baseline": 7.0,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 7,
+              "n_fights": 13,
+              "n_bonus": 3,
+              "spearman_rho": -0.09952267030562385,
+              "bonus_mean_rank": 7.666666666666667,
+              "random_baseline": 7.0,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 8,
+              "n_fights": 11,
+              "n_bonus": 3,
+              "spearman_rho": 0.20310096011589904,
+              "bonus_mean_rank": 5.666666666666667,
+              "random_baseline": 6.0,
+              "top1_was_bonus": true
+            }
+          ],
+          "summary": {
+            "n_events": 8,
+            "mean_event_rho": 0.138884043941558,
+            "mean_bonus_rank": 5.989583333333334,
+            "mean_random_baseline": 6.9375,
+            "top1_hit_rate": 0.5
+          }
+        }
+      }
+    },
+    {
+      "key": "nn",
+      "label": "Neural Net (12\u219216\u21921)",
+      "calibration": {
+        "brier": 0.2805290016164248,
+        "ece": 0.2443053626516612,
+        "prob_true_per_bin": [
+          0.2857142857142857,
+          0.42857142857142855,
+          0.3,
+          0.047619047619047616,
+          0.20833333333333334,
+          0.29411764705882354,
+          0.25,
+          0.26666666666666666,
+          0.18181818181818182,
+          0.23809523809523808
+        ],
+        "prob_pred_per_bin": [
+          0.0015886944162221404,
+          0.009968126103991554,
+          0.024877317436039447,
+          0.05721287127761614,
+          0.13256041581432024,
+          0.21892481078119838,
+          0.3200557574629784,
+          0.49065922796726225,
+          0.6624120419675653,
+          0.8820126539184934
+        ]
+      },
+      "spearman": {
+        "overall": {
+          "spearman_rho": -0.03871592202888805,
+          "p_value": 0.697813279202713,
+          "n_fights": 103
+        },
+        "per_event": {
+          "events": [
+            {
+              "event_id": 1,
+              "n_fights": 13,
+              "n_bonus": 3,
+              "spearman_rho": 0.19518001458970663,
+              "bonus_mean_rank": 5.666666666666667,
+              "random_baseline": 7.0,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 2,
+              "n_fights": 14,
+              "n_bonus": 3,
+              "spearman_rho": 0.6261585997769192,
+              "bonus_mean_rank": 2.6666666666666665,
+              "random_baseline": 7.5,
+              "top1_was_bonus": true
+            },
+            {
+              "event_id": 3,
+              "n_fights": 12,
+              "n_bonus": 4,
+              "spearman_rho": -0.35846408954943243,
+              "bonus_mean_rank": 8.25,
+              "random_baseline": 6.5,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 4,
+              "n_fights": 13,
+              "n_bonus": 3,
+              "spearman_rho": -0.5887840577551898,
+              "bonus_mean_rank": 11.0,
+              "random_baseline": 7.0,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 5,
+              "n_fights": 14,
+              "n_bonus": 4,
+              "spearman_rho": -0.11766968108291043,
+              "bonus_mean_rank": 8.25,
+              "random_baseline": 7.5,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 6,
+              "n_fights": 13,
+              "n_bonus": 3,
+              "spearman_rho": -0.19544867268602545,
+              "bonus_mean_rank": 8.333333333333334,
+              "random_baseline": 7.0,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 7,
+              "n_fights": 13,
+              "n_bonus": 3,
+              "spearman_rho": 0.09813067629253162,
+              "bonus_mean_rank": 6.333333333333333,
+              "random_baseline": 7.0,
+              "top1_was_bonus": false
+            },
+            {
+              "event_id": 8,
+              "n_fights": 11,
+              "n_bonus": 3,
+              "spearman_rho": 0.09704539257058052,
+              "bonus_mean_rank": 5.666666666666667,
+              "random_baseline": 6.0,
+              "top1_was_bonus": false
+            }
+          ],
+          "summary": {
+            "n_events": 8,
+            "mean_event_rho": -0.03048147723047751,
+            "mean_bonus_rank": 7.020833333333334,
             "mean_random_baseline": 6.9375,
             "top1_hit_rate": 0.125
           }
@@ -227,35 +483,13 @@
       }
     }
   ],
-  "skipped": [
-    {
-      "key": "xgb",
-      "label": "XGBoost",
-      "reason": "XGBoostError: "
-    }
-  ],
+  "best": "xgb",
   "data": {
-    "total_unique_fights": 611,
-    "feature_dim": 115,
-    "feature_filter_active": false,
-    "train": {
-      "fights": 338,
-      "samples": 676,
-      "pos": 182,
-      "pos_pct": 26.923078536987305
-    },
-    "val": {
-      "fights": 170,
-      "samples": 340,
-      "pos": 90,
-      "pos_pct": 26.47058868408203
-    },
     "test": {
       "fights": 103,
-      "samples": 206,
-      "pos": 52,
-      "pos_pct": 25.242719650268555
-    },
-    "nan_features_replaced": 0
+      "rows": 206,
+      "pos": 26,
+      "pos_pct": 25.24271844660194
+    }
   }
 }
