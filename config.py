@@ -1,11 +1,16 @@
 """
 config.py — Central configuration for UFC Matchmaker
-"""
-# Configuration for UFC Fight Matchmaker
-# Pipeline: 115-dim features (career + matchup + odds + context + rolling fight_stats)
-# → binary classification (bonus fight prediction) → matchmaker ranking
-# Legacy 48-dim regression pipeline has been deprecated
 
+Final pipeline:
+  fighter stats × 2 → build_full_matchup_vector() [115-dim]
+                    → subset_full_feature_vector() [12 RFECV features]
+                    → StandardScaler.transform()
+                    → FightBonusNN.forward() → sigmoid → P(bonus fight)
+
+The 115-dim full vector is still built end-to-end so the matchmaker reuses the
+same feature pipeline as training; ``SELECTED_FEATURES`` in pipeline_config.py
+selects the 12 columns the trained model expects.
+"""
 import os
 from pathlib import Path
 
@@ -13,6 +18,18 @@ BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 MODELS_DIR = BASE_DIR / "models"
 DB_PATH = DATA_DIR / "ufc_matchmaker.db"
+
+# ── Final shipped model ──────────────────────────────────────────────────────
+# The matchmaker (models/matchmaker_v2.py) loads the checkpoint + scaler below.
+FINAL_MODEL = {
+    "type": "neural_network",
+    "checkpoint": str(MODELS_DIR / "checkpoints" / "nn_12feat.pt"),
+    "scaler": str(MODELS_DIR / "checkpoints" / "scaler_12feat.pkl"),
+    "features": "RFECV 12-dim subset of 115",
+    "auc": 0.5991,  # reference val AUC reported during selection sweep
+    "params": 257,
+    "architecture": "12 -> 16 -> 1 (GELU + BatchNorm + Dropout)",
+}
 
 # ── Scraping ──────────────────────────────────────────────────────────────────
 SCRAPING = {
@@ -48,7 +65,12 @@ TRAIN_POSITIVE_RATE = TRAIN_POSITIVE_FIGHTS / TRAIN_UNIQUE_FIGHTS  # ≈ 0.269
 SCALE_POS_WEIGHT = TRAIN_NEGATIVE_FIGHTS / TRAIN_POSITIVE_FIGHTS  # ≈ 2.714 (XGBoost / diagnostics)
 
 # ── Feature dimensions ────────────────────────────────────────────────────────
+# FEATURE_DIM is the *full* engineered vector width. Do not change without also
+# updating ALL_FEATURE_NAMES in feature_engineering.py — data_loader.py asserts
+# the two stay in sync. The trained classifier consumes a SUBSET of these
+# columns (see SELECTED_FEATURES in pipeline_config.py).
 FEATURE_DIM = 115
+SELECTED_FEATURE_DIM = 12
 USE_CROSS_FEATURES = True
 
 # ── Binary classification pipeline ───────────────────────────────────────────
@@ -66,7 +88,9 @@ BINARY_CLASSIFICATION_CONFIG = {
     "random_seed": 42,
 }
 
-# ── Neural Network (legacy regression model — kept for backward compat) ──────
+# ── Legacy regression NN config ──────────────────────────────────────────────
+# Kept only so models/training.py and models/matchmaker.py (both marked LEGACY)
+# can still import. The production model uses BinaryNNConfig in models/nn_binary.py.
 NN = {
     "input_dim": 115,
     "hidden_layers": [256, 128, 64, 32],
@@ -77,11 +101,9 @@ NN = {
     "epochs": 150,
     "val_split": 0.2,
     "early_stopping_patience": 15,
-    "model_save_path": str(MODELS_DIR / "fight_bonus_classifier.pt"),
+    "model_save_path": str(MODELS_DIR / "fight_quality_nn.pt"),
     "scaler_save_path": str(MODELS_DIR / "feature_scaler.pkl"),
 }
-
-# Removed: heuristic scoring replaced by ML-based binary classification
 
 # ── Weight Classes ────────────────────────────────────────────────────────────
 WEIGHT_CLASSES = [

@@ -1,217 +1,100 @@
-# UFC Matchmaker — AI-Powered Fight Pairing System
+# UFC Fight Matchmaker
 
-A full-stack Python system that scrapes UFC fighter and fight data, trains a Neural Network on fight quality metrics, and predicts the best fighter pairings from a business/entertainment perspective.
-
----
-
-## Architecture
-
-```
-ufc_matchmaker/
-├── scrapers/
-│   ├── ufc_api_wrapper.py      # Wrapper around FritzCapuyan/ufc-api (Sherdog fighter/event data)
-│   ├── ufc_stats_scraper.py    # Selenium scraper for UFCStats.com (detailed per-fight stats)
-│   └── tapology_scraper.py     # Selenium scraper for Tapology (odds, rankings)
-├── data/
-│   ├── db.py                   # SQLite database manager
-│   ├── schema.sql              # Database schema
-│   └── pipeline.py             # Full data collection pipeline
-├── models/
-│   ├── feature_engineering.py  # Feature extraction from raw data
-│   ├── fight_quality_nn.py     # Neural Network: fight quality scorer
-│   ├── matchmaker.py           # Matchmaking engine using trained NN
-│   └── training.py             # Training loop + evaluation
-├── utils/
-│   ├── driver.py               # Selenium WebDriver factory
-│   ├── rate_limiter.py         # Polite scraping rate limiter
-│   └── logger.py               # Structured logging
-├── dashboard/
-│   └── app.py                  # Rich terminal dashboard (rich + typer CLI)
-├── main.py                     # Entry point
-├── config.py                   # Configuration
-└── requirements.txt
-```
-
----
+An ML-powered system that predicts fight entertainment value and suggests the
+most exciting matchups across UFC weight classes.
 
 ## Quick Start
 
 ```bash
-# 1. Install dependencies
+# Install dependencies
 pip install -r requirements.txt
 
-# 2. Collect data (runs all scrapers, populates SQLite DB)
-python main.py collect --events 50 --fighters 300
+# Run the matchmaker on a division
+python main.py matchmake Lightweight --top 10
 
-# 3. Train the Neural Network
-python main.py train --epochs 100
+# Build a dream card
+python main.py dreamcard --fights 5
 
-# 4. Generate fight pairings for a weight class
-python main.py predict --weight-class Lightweight --top 20
-
-# 5. Launch interactive dashboard
-python main.py dashboard
+# Quick demo (Lightweight top 10 + dream card)
+python main.py demo
 ```
 
----
+## How It Works
 
-## Data Sources
+1. Scrape fighter stats, fight history, and bonus labels from UFCStats and Wikipedia
+2. Engineer **115 features** per matchup — career stats, rolling form, odds, matchup cross-features, fight context
+3. RFECV selects the **12 most predictive** features (`models/pipeline_config.py`)
+4. A tiny neural network (**257 params**, 12 → 16 → 1) predicts entertainment probability
+5. The matchmaker scores every possible pairing in a division and ranks by P(bonus fight)
 
-| Source | Data | Method |
-|---|---|---|
-| UFCStats.com | Per-fight strike/TD/control splits, round-by-round | Selenium |
-| Sherdog.com | Fighter career stats, win methods, history | ufc-api wrapper |
-| Tapology.com | Betting odds history, rankings, fan interest | Selenium |
-| UFC.com | Official rankings, weight classes | Selenium |
-
----
-
-## Neural Network
-
-The NN predicts a **Fight Quality Score (0-100)** based on:
-
-**Fighter Features (per fighter):**
-- Physical: height, reach, weight, reach advantage
-- Offense: sig strike accuracy, KO power (KO rate), submission rate
-- Defense: strike defense %, TD defense %
-- Style: grappling ratio, clinch ratio, distance ratio
-- Activity: fight frequency, recent form (last 5 fights)
-- Career: total fights, win %, finish rate
-
-**Matchup Features (cross-referenced):**
-- Style clash score (striker vs grappler differential)
-- Reach differential
-- Size differential
-- Finish probability (combined)
-- Competitive balance (ranking proximity)
-- Crowd appeal proxy (finish rate × ranking × opponent quality)
-
-**Business Outcome Targets (from historical data):**
-- Fight duration score (longer = generally better for fans)
-- Action density (sig strikes per minute)
-- Finish drama score (late finish > early finish for drama)
-- Upset potential (odds differential)
-- Rematch demand proxy
-
----
-
-## Neural Network Architecture
-
+Inference per pairing:
 ```
-INPUT
-┌─────────────────────────────────────────────────────────────────┐
-│  Feature Vector  [batch, 48]                                    │
-│  48 floats: 24 per fighter (physical, offense, defense,         │
-│  style, activity, career) + matchup cross-features              │
-└────────────────────────┬────────────────────────────────────────┘
-                         │
-                    ── ENCODER ──
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Linear(48 → 256)                                               │
-│  Expands the input into a rich 256-dim representation.          │
-│  Gives the network enough capacity to learn complex feature     │
-│  interactions between the two fighters.                         │
-│  + LayerNorm(256)  — normalizes activations for stable training │
-│  + GELU            — smooth non-linearity (better than ReLU     │
-│                       for deep nets; allows small neg. values)  │
-│  + Dropout(0.3)    — randomly zeros 30% of neurons to prevent  │
-│                       overfitting on limited fight data         │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ [batch, 256]
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Linear(256 → 128)                                              │
-│  First compression step. Forces the network to distill the      │
-│  256-dim representation into the 128 most predictive features.  │
-│  + LayerNorm(128)                                               │
-│  + GELU                                                         │
-│  + Dropout(0.3)                                                 │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ [batch, 128]
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Linear(128 → 64)                                               │
-│  Second compression. Abstracts fighter matchup patterns into    │
-│  a compact 64-dim space (e.g. "striker vs grappler",            │
-│  "ranked vs unranked", "brawler vs technician").                │
-│  + LayerNorm(64)                                                │
-│  + GELU                                                         │
-│  + Dropout(0.3)                                                 │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ [batch, 64]
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Linear(64 → 32)                                                │
-│  Final encoder layer. No Dropout here — the 32-dim bottleneck  │
-│  is the learned "fight quality embedding" passed to the head.   │
-│  + LayerNorm(32)                                                │
-│  + GELU                                                         │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ [batch, 32]
-                    ── HEAD ──
-                         │
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Linear(32 → 16)                                                │
-│  Small projection that re-weights the fight quality embedding   │
-│  before the final scalar prediction.                            │
-│  + GELU                                                         │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ [batch, 16]
-                         ▼
-┌─────────────────────────────────────────────────────────────────┐
-│  Linear(16 → 1)                                                 │
-│  Collapses all features into a single raw score.                │
-│  + Sigmoid  — squashes output to (0, 1)                         │
-└────────────────────────┬────────────────────────────────────────┘
-                         │ [batch, 1]  ∈ (0, 1)
-                         ▼
-                   × 100  (post-hoc)
-                         │
-                         ▼
-                  Fight Quality Score
-                     0 — 100
+fighter_a + fighter_b
+  -> build_full_matchup_vector()    [115-dim]
+  -> subset_full_feature_vector()   [12-dim]
+  -> StandardScaler.transform()
+  -> FightBonusNN.forward() -> sigmoid -> P(bonus fight)
 ```
 
-| Layer | Input | Output | Purpose |
-|---|---|---|---|
-| Linear 1 | 48 | 256 | Expand features, learn pairwise interactions |
-| Linear 2 | 256 | 128 | Compress, extract dominant signals |
-| Linear 3 | 128 | 64 | Abstract matchup archetypes |
-| Linear 4 | 64 | 32 | Bottleneck fight quality embedding |
-| Linear 5 | 32 | 16 | Re-weight embedding for final prediction |
-| Linear 6 | 16 | 1 | Scalar score (sigmoid → ×100) |
+Both orderings (A,B) and (B,A) are scored and averaged for symmetry.
 
-All encoder layers use **LayerNorm + GELU + Dropout(0.3)** except the last encoder layer which omits Dropout.
-Weights are initialized with **Kaiming Normal** (suited for GELU/ReLU activations).
+## Model Performance
 
----
+- **AUC = 0.5991** (5-fold temporal CV reference; latest sweep AUC 0.6086 on val)
+- **257 parameters** — appropriate capacity for ~338 unique training fights, 26.9% positive rate
+- 12 selected features include style clash, recent knockdowns, performance consistency,
+  strike trends, and a five-rounder flag
 
-## Fight Quality Scoring
+## Project Structure
 
 ```
-FightQualityScore = w1*ActionDensity + w2*FinishProbability + 
-                    w3*CompetitiveBalance + w4*StyleClash + 
-                    w5*MarketabilityScore + w6*UpsetPotential
+models/
+  matchmaker_v2.py         The product: rank matchups by entertainment
+  nn_binary.py             Neural network (12 -> 16 -> 1) + training sweep
+  feature_engineering.py   115-dim feature vector
+  rolling_features.py      Fight-level rolling stats (leak-safe)
+  pipeline_config.py       Feature selection + temporal split config
+  data_loader.py           Canonical train/val/test pipeline
+  data_splits.py           Temporal split + augmentation
+  baselines.py             LogReg / RF / XGBoost reference baselines
+  feature_selection.py     RFECV pipeline
+  xgb_tuning.py            XGBoost hyperparameter sweep
+  pca_analysis.py          PCA variance analysis (experimental)
+  pca_pipeline.py          PCA-based features (experimental)
+  interpretability.py      SHAP analysis
+  backtesting.py           Per-event time-respecting backtest
+  experiment_summary.py    Tables + plots for the deck
+  fight_quality_nn.py      LEGACY 48-dim regression NN
+  matchmaker.py            LEGACY heuristic matchmaker
+  training.py              LEGACY regression training loop
+  checkpoints/
+    nn_12feat.pt           Trained 12-feat binary classifier
+    scaler_12feat.pkl      StandardScaler (fit on 12-dim train)
+scrapers/                  UFCStats + Tapology + Wikipedia scrapers
+data/                      SQLite DB + label imports
+outputs/                   Plots, experiment logs, backtest reports
+dashboard/                 Rich-terminal pretty printers used by main.py
 ```
 
-Weights learned by the NN from historical fight data.
+## CLI
 
----
+| Command | What it does |
+|---|---|
+| `python main.py collect` | Scrape fresh data into SQLite |
+| `python main.py train` | Retrain the 12-feat NN; saves `models/checkpoints/nn_12feat.pt` + `scaler_12feat.pkl` |
+| `python main.py matchmake Lightweight --top 10` | Rank pairings in a division |
+| `python main.py dreamcard --fights 5` | Best fights across all eight men's divisions |
+| `python main.py evaluate` | NN AUC / F1 on the held-out test split |
+| `python main.py backtest --from 2026-01-01` | Per-event time-respecting backtest |
+| `python main.py experiments` | Generate summary tables + plots |
+| `python main.py demo` | Lightweight top 10 + 5-fight dream card |
+| `python main.py stats` | DB record counts |
+| `python main.py seed-db` | Minimal SQLite for offline tests (no scraping) |
+| `python main.py pca` | PCA variance breakdown on the full 115-dim feature matrix |
 
-## Output Example
+## Team
 
-```
-TOP PREDICTED MATCHUPS — Lightweight Division
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-#1  Islam Makhachev   vs  Charles Oliveira     Score: 94.2 / 100
-    Style Clash: ★★★★★  Balance: ★★★★★  Finish Prob: 67%
-    "Elite grappler vs elite submission artist — action guaranteed"
-
-#2  Dustin Poirier    vs  Justin Gaethje       Score: 91.8 / 100
-    Style Clash: ★★★★☆  Balance: ★★★★★  Finish Prob: 78%
-    "High-output strikers, both durable — likely war"
-```
+- **Raji** — Model architecture, baselines, SHAP, integration
+- **Lorenzo** — Data labels, scraping, backtesting
+- **Gustave** — Cross-features, PCA, code cleanup, dashboard
+- **Mattheus** — Temporal splits, CV, calibration, presentation

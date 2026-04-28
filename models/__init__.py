@@ -1,59 +1,57 @@
 """
 models/__init__.py
 
-Heavy modules (torch — FightQualityNN, training, matchmaker) load lazily so that
-lightweight imports work without PyTorch:
+Light eager imports (no torch). Heavy modules are loaded lazily on first
+attribute access so that ``from models.feature_engineering import ...`` keeps
+working without importing torch.
 
-    from models.data_loader import get_canonical_splits  # OK without torch
-    from models.feature_engineering import build_full_matchup_vector
-
-Use lazy attributes for training / NN / matchmaker:
-
-    from models import Matchmaker, FightQualityNN, train
+    from models import MatchmakerV2          # lazy — pulls in nn_binary + torch
+    from models import get_canonical_splits  # eager — pure-numpy data pipeline
+    from models import SELECTED_FEATURES, FEATURE_DIM
 """
-
 from __future__ import annotations
 
 import importlib
 from typing import Any
 
 from .feature_engineering import (
+    ALL_FEATURE_NAMES,
     build_full_matchup_vector,
-    build_matchup_vector,
-    compute_fight_quality_score,
-    compute_fighter_style_metrics,
     extract_fighter_features,
     extract_matchup_features,
+    subset_full_feature_vector,
 )
+from .data_loader import get_canonical_splits
+from .pipeline_config import SELECTED_FEATURES
+
+from config import FEATURE_DIM, SELECTED_FEATURE_DIM, FINAL_MODEL
 
 _LAZY_ATTRS: dict[str, tuple[str, str]] = {
-    "FightQualityNN": ("fight_quality_nn", "FightQualityNN"),
-    "Matchmaker": ("matchmaker", "Matchmaker"),
-    "HeuristicMatchmaker": ("matchmaker", "HeuristicMatchmaker"),
-    "MatchupResult": ("matchmaker", "MatchupResult"),
-    "FighterProfile": ("matchmaker", "FighterProfile"),
-    "train": ("training", "train"),
-    "load_model": ("training", "load_model"),
-    "load_scaler": ("training", "load_scaler"),
-    "evaluate": ("training", "evaluate"),
+    # Final shipped pipeline
+    "MatchmakerV2": ("matchmaker_v2", "MatchmakerV2"),
+    "FightBonusNN": ("nn_binary", "FightBonusNN"),
+    "load_binary_nn": ("nn_binary", "load_binary_nn"),
+    # Reference / legacy (still importable for retraining + presentation)
+    "BaselineComparison": ("baselines", "BaselineComparison"),
+    "backtest": ("backtesting", "backtest"),
 }
 
 __all__ = [
-    "FightQualityNN",
-    "Matchmaker",
-    "HeuristicMatchmaker",
-    "MatchupResult",
-    "FighterProfile",
-    "train",
-    "load_model",
-    "load_scaler",
-    "evaluate",
+    "MatchmakerV2",
+    "FightBonusNN",
+    "load_binary_nn",
+    "BaselineComparison",
+    "backtest",
+    "get_canonical_splits",
     "build_full_matchup_vector",
-    "build_matchup_vector",
     "extract_fighter_features",
     "extract_matchup_features",
-    "compute_fight_quality_score",
-    "compute_fighter_style_metrics",
+    "subset_full_feature_vector",
+    "ALL_FEATURE_NAMES",
+    "SELECTED_FEATURES",
+    "FEATURE_DIM",
+    "SELECTED_FEATURE_DIM",
+    "FINAL_MODEL",
 ]
 
 

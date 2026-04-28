@@ -1,3 +1,5 @@
+# EXPERIMENTAL: PCA-based feature pipeline. Results showed RFECV features outperformed PCA.
+# Kept for reference and presentation plots.
 """
 PCA on the full 115-dim scaled matchup vector, then LogReg CV over component counts.
 

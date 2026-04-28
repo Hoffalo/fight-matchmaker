@@ -1,3 +1,5 @@
+# LEGACY: Heuristic-based matchmaker. Replaced by matchmaker_v2.py (ML-based).
+# Kept for reference only. Not used in the production pipeline.
 """
 models/matchmaker.py
 ═══════════════════════════════════════════════════════════════════════════════

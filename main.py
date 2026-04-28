@@ -3,21 +3,21 @@ main.py
 ═══════════════════════════════════════════════════════════════════════════════
 UFC Matchmaker — Command Line Interface
 
-All commands are defined here using Typer.
 Run `python main.py --help` to see available commands.
 
 Commands
 ────────
-  collect   — Run the full data scraping pipeline
-  train     — Train FightQualityNN on 72-dim features (bonus labels)
-  predict   — Rank matchups by model score or heuristic
-  matchup   — Score one specific named fighter pairing
-  card      — Build a suggested full event card
-  stats     — Show current database record counts
-  evaluate  — Evaluate trained NN on stored regression targets
-  pca       — PCA variance breakdown on scaled 115-dim training features
-  seed-db   — Create minimal SQLite DB for offline PCA/tests (no scraping)
-  demo      — Run with synthetic demo data (no scraping needed)
+  collect       Run the full data scraping pipeline
+  train         Retrain the 12-feat NN classifier on current data
+  matchmake     Rank matchups in a weight class
+  dreamcard     Build a dream card across divisions
+  evaluate      Evaluate the trained NN on the test split
+  backtest      Per-event backtest from a chosen cutoff date
+  experiments   Generate experiment summary tables and plots
+  demo          Quick demo: top 10 Lightweight matchups + dream card
+  stats         Show current database record counts
+  seed-db       Create a minimal SQLite DB for offline tests (no scraping)
+  pca           Cumulative variance + PC1 loadings on training features
 ═══════════════════════════════════════════════════════════════════════════════
 """
 import logging
@@ -29,15 +29,13 @@ from rich.console import Console
 
 from utils.logger import setup_logging
 from data.db import Database
-from config import WEIGHT_CLASSES, NN, BASE_DIR
+from config import WEIGHT_CLASSES, BASE_DIR
 
-# ── App setup ────────────────────────────────────────────────────────────────
-app     = typer.Typer(
+app = typer.Typer(
     name="ufc-matchmaker",
     help=(
-        "AI-powered UFC fight pairing predictor.\n\n"
-        "Scrapes fighter data, trains a 72-feature model (fighter stats + matchup "
-        "cross-features), and ranks matchups by predicted entertainment value."
+        "AI-powered UFC fight matchmaker. Trains a 12-feature neural network on "
+        "fighter stats and ranks matchups by predicted entertainment value."
     ),
     add_completion=False,
     rich_markup_mode="rich",
@@ -46,7 +44,7 @@ console = Console()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# collect
+# collect — scrape data into the local SQLite DB
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.command()
@@ -57,17 +55,7 @@ def collect(
     headless: bool          = typer.Option(True,  "--headless/--no-headless", help="Run browser headlessly"),
     verbose: bool           = typer.Option(False, "--verbose",  "-v", help="Debug-level logging"),
 ):
-    """
-    [bold]Scrape UFC data and populate the local database.[/bold]
-
-    Runs the full data collection pipeline:
-      1. Events + fights from UFCStats.com (Selenium)
-      2. Fighter career stats from UFCStats.com (Selenium)
-      3. Rankings from Tapology.com (Selenium)
-      4. Derived metrics + fight quality scores computed locally
-
-    This command should be run [italic]before[/italic] training.
-    """
+    """[bold]Scrape UFC data and populate the local database.[/bold]"""
     setup_logging("DEBUG" if verbose else "INFO",
                   log_file=str(BASE_DIR / "logs" / "collect.log"))
 
@@ -88,75 +76,42 @@ def collect(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# train
+# train — retrain the 12-feat binary NN
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.command()
-def train(
-    epochs: int   = typer.Option(NN["epochs"],        "--epochs",    "-e", help="Number of training epochs"),
-    lr: float     = typer.Option(NN["learning_rate"], "--lr",              help="Learning rate"),
-    batch: int    = typer.Option(NN["batch_size"],    "--batch",     "-b", help="Batch size"),
-    evaluate_after: bool = typer.Option(True, "--eval/--no-eval",         help="Evaluate model after training"),
-    verbose: bool = typer.Option(False, "--verbose", "-v"),
-):
+def train(verbose: bool = typer.Option(False, "--verbose", "-v")):
     """
-    [bold]Train the FightQualityNN regression head on bonus-label targets.[/bold]
+    [bold]Retrain the 12-feature NN binary classifier.[/bold]
 
-    Uses 72-dimensional vectors (24 + 24 fighter features + 24 matchup cross-features).
-    Requires populated fights and fighters in the DB — run [cyan]collect[/cyan] first.
-
-    Checkpoint and scaler paths come from [dim]config.NN[/dim] (defaults under [dim]models/[/dim]).
+    Runs the small-data hyperparameter sweep on the RFECV-selected features and
+    saves the best model + scaler to [dim]models/checkpoints/[/dim].
     """
     setup_logging("DEBUG" if verbose else "INFO",
                   log_file=str(BASE_DIR / "logs" / "train.log"))
 
-    from models.training import train as run_training, evaluate as eval_model
-    from dashboard import print_training_eval, console as dash_console
+    from models.nn_binary import run_twelve_feature_comparison
 
-    # Allow CLI overrides to config
-    cfg = dict(NN)
-    cfg["epochs"]        = epochs
-    cfg["learning_rate"] = lr
-    cfg["batch_size"]    = batch
-
-    db = Database()
-    dash_console.print("\n[bold cyan]Training Fight Quality Neural Network...[/bold cyan]\n")
-
-    model = run_training(db=db, cfg=cfg)
-
-    if evaluate_after:
-        metrics = eval_model(model, db, cfg=cfg)
-        print_training_eval(metrics)
+    console.print("\n[bold cyan]Training 12-feature binary classifier...[/bold cyan]\n")
+    result = run_twelve_feature_comparison()
+    console.print(
+        f"\n[green]Done.[/green] best val AUC = {result['best_val_auc']:.4f}, "
+        f"params = {result['n_parameters']}, ckpt = {result['checkpoint']}"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# predict
+# matchmake — rank matchups in a weight class
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.command()
-def predict(
-    weight_class: str       = typer.Option("Lightweight", "--weight-class", "-w",
-                                           help=f"One of: {', '.join(WEIGHT_CLASSES)}"),
-    top: int                = typer.Option(20,    "--top",     "-n", help="Number of matchups to show"),
-    min_fights: int         = typer.Option(3,     "--min-fights",   help="Minimum career fights to include a fighter"),
-    ranked_only: bool       = typer.Option(False, "--ranked-only",  help="Only include currently ranked fighters"),
-    heuristic: bool         = typer.Option(False, "--heuristic",    help="Use heuristic scorer (no trained model needed)"),
-    no_narrative: bool      = typer.Option(False, "--no-narrative", help="Hide narrative descriptions"),
-    verbose: bool           = typer.Option(False, "--verbose", "-v"),
+def matchmake(
+    weight_class: str = typer.Argument(..., help=f"One of: {', '.join(WEIGHT_CLASSES)}"),
+    top: int          = typer.Option(10, "--top", "-n", help="Number of matchups to show"),
+    five_round: bool  = typer.Option(False, "--five-round/--three-round",
+                                     help="Score as a 5-round main-event-style fight"),
 ):
-    """
-    [bold]Predict the best matchups for a weight class.[/bold]
-
-    Generates pairings and ranks them by NN score blended with business signals,
-    unless [cyan]--heuristic[/cyan] is used (hand-crafted scorer, no checkpoint).
-
-    Requires a trained model when heuristic mode is off.
-    """
-    setup_logging("DEBUG" if verbose else "INFO")
-
-    from dashboard import print_matchup_report
-
-    # Validate weight class
+    """[bold]Rank all possible pairings in a weight class.[/bold]"""
     wc_lower = [w.lower() for w in WEIGHT_CLASSES]
     if weight_class.lower() not in wc_lower:
         console.print(
@@ -166,144 +121,133 @@ def predict(
         raise typer.Exit(1)
     canonical_wc = WEIGHT_CLASSES[wc_lower.index(weight_class.lower())]
 
-    db = Database()
-
-    if heuristic:
-        from models.matchmaker import HeuristicMatchmaker
-        console.print(f"\n[yellow]Using heuristic scorer (no model)[/yellow]")
-        mm = HeuristicMatchmaker(db)
-        results = mm.predict_weight_class(canonical_wc, top_n=top, min_fights=min_fights)
-        print_matchup_report(results, canonical_wc, show_narrative=not no_narrative)
-    else:
-        from models.matchmaker import Matchmaker
-        try:
-            with Matchmaker(db) as mm:
-                results = mm.predict_weight_class(
-                    canonical_wc,
-                    top_n=top,
-                    min_fights=min_fights,
-                    ranked_only=ranked_only,
-                )
-            print_matchup_report(results, canonical_wc, show_narrative=not no_narrative)
-        except RuntimeError as e:
-            console.print(f"[red]{e}[/red]")
-            console.print("[dim]Tip: use --heuristic to run without a trained model.[/dim]")
-            raise typer.Exit(1)
+    from models.matchmaker_v2 import MatchmakerV2
+    mm = MatchmakerV2()
+    mm.rank_weight_class(canonical_wc, top_n=top, is_five_rounder=five_round)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# matchup (specific named pairing)
+# dreamcard — build a dream card across divisions
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.command()
-def matchup(
-    fighter_a: str = typer.Argument(..., help="First fighter name (as in DB)"),
-    fighter_b: str = typer.Argument(..., help="Second fighter name"),
-    heuristic: bool = typer.Option(False, "--heuristic"),
-    verbose: bool   = typer.Option(False, "--verbose", "-v"),
+def dreamcard(
+    fights: int = typer.Option(5, "--fights", "-n", help="Number of fights on the card"),
+    divisions: Optional[str] = typer.Option(
+        None, "--divisions", "-d",
+        help="Comma-separated list of weight classes (default: all eight men's divisions)",
+    ),
 ):
-    """
-    [bold]Score one specific fighter pairing.[/bold]
+    """[bold]Build a dream card — best fights across divisions, no fighter repeats.[/bold]"""
+    wcs = (
+        [w.strip() for w in divisions.split(",")] if divisions else None
+    )
+    from models.matchmaker_v2 import MatchmakerV2
+    mm = MatchmakerV2()
+    mm.build_card(weight_classes=wcs, total_fights=fights)
 
-    Example:
-      python main.py matchup "Dustin Poirier" "Justin Gaethje"
-    """
+
+# ─────────────────────────────────────────────────────────────────────────────
+# demo — quick top-10 + dream card
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command()
+def demo():
+    """[bold]Quick demo: top 10 Lightweight matchups + 5-fight dream card.[/bold]"""
+    from models.matchmaker_v2 import MatchmakerV2
+    mm = MatchmakerV2()
+    mm.rank_weight_class("Lightweight", top_n=10)
+    mm.build_card(total_fights=5)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# evaluate — NN on test split
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command()
+def evaluate(verbose: bool = typer.Option(False, "--verbose", "-v")):
+    """[bold]Evaluate the trained 12-feat NN on the held-out test split.[/bold]"""
     setup_logging("DEBUG" if verbose else "INFO")
 
-    from dashboard import print_specific_matchup
+    import numpy as np
+    import torch
+    from sklearn.metrics import roc_auc_score, f1_score
 
-    db = Database()
+    from config import FINAL_MODEL
+    from models.data_loader import get_canonical_splits
+    from models.nn_binary import FightBonusNN
 
-    if heuristic:
-        from models.matchmaker import HeuristicMatchmaker
-        mm = HeuristicMatchmaker(db)
-        result = mm.predict_specific_matchup(fighter_a, fighter_b)
-        if result is None:
-            console.print("[red]Could not score matchup. Check fighter names.[/red]")
-            raise typer.Exit(1)
-        print_specific_matchup(result)
-        return
-
-    from models.matchmaker import Matchmaker
-    try:
-        with Matchmaker(db) as mm:
-            result = mm.predict_specific_matchup(fighter_a, fighter_b)
-        if result is None:
-            console.print("[red]Could not score matchup. Check fighter names.[/red]")
-            raise typer.Exit(1)
-        print_specific_matchup(result)
-    except RuntimeError as e:
-        console.print(f"[red]{e}[/red]")
+    ckpt_path = Path(FINAL_MODEL["checkpoint"])
+    if not ckpt_path.is_file():
+        console.print(
+            f"[red]Checkpoint not found: {ckpt_path}[/red]\n"
+            "Run: [cyan]python main.py train[/cyan]"
+        )
         raise typer.Exit(1)
 
+    splits = get_canonical_splits()
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    cfg = ckpt["config"]
+    model = FightBonusNN(
+        input_dim=cfg["input_dim"],
+        hidden_dims=tuple(cfg["hidden_dims"]),
+        dropout=cfg["dropout"],
+    )
+    model.load_state_dict(ckpt["model_state"])
+    model.eval()
+
+    X_te = torch.from_numpy(splits["X_test"].astype(np.float32))
+    y_te = splits["y_test"].astype(np.int32)
+    with torch.no_grad():
+        logits = model(X_te).squeeze(-1).numpy()
+    probs = 1.0 / (1.0 + np.exp(-logits))
+    preds = (probs >= 0.5).astype(np.int32)
+
+    auc = roc_auc_score(y_te, probs)
+    f1 = f1_score(y_te, preds, zero_division=0)
+    pos_rate = float(y_te.mean())
+
+    console.print(
+        f"\n[bold]Test split[/bold]  N={len(y_te)}  pos_rate={pos_rate:.3f}\n"
+        f"  AUC = [green]{auc:.4f}[/green]\n"
+        f"  F1  = [green]{f1:.4f}[/green]\n"
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
-# card (suggested full event)
+# backtest — per-event simulation from a cutoff
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.command()
-def card(
-    weight_classes: Optional[str] = typer.Option(
-        None, "--weight-classes", "-w",
-        help="Comma-separated weight classes. Default: all."
-    ),
-    fights_per_class: int = typer.Option(2, "--per-class", "-n",
-                                         help="Fights per weight class"),
-    heuristic: bool = typer.Option(False, "--heuristic"),
-    verbose: bool   = typer.Option(False, "--verbose", "-v"),
+def backtest(
+    test_from: str = typer.Option("2026-01-01", "--from", help="Cutoff date (YYYY-MM-DD)"),
+    k: int         = typer.Option(3, "--k", help="Top-K per event for hit-rate"),
+    verbose: bool  = typer.Option(False, "--verbose", "-v"),
 ):
-    """
-    [bold]Build a suggested full event fight card.[/bold]
-
-    Selects the best non-overlapping matchups across all weight classes
-    (no fighter appears twice on the card).
-    """
+    """[bold]Per-event backtest from a chosen cutoff.[/bold]"""
     setup_logging("DEBUG" if verbose else "INFO")
-
-    from dashboard import print_fight_card
-
-    wcs = (
-        [w.strip() for w in weight_classes.split(",")]
-        if weight_classes
-        else WEIGHT_CLASSES
-    )
+    from models.backtesting import backtest as run_backtest
 
     db = Database()
-
-    if heuristic:
-        from models.matchmaker import HeuristicMatchmaker
-        mm = HeuristicMatchmaker(db)
-        fight_card = {}
-        used = set()
-        for wc in wcs:
-            candidates = mm.predict_weight_class(wc, top_n=fights_per_class * 5)
-            selected = []
-            for m in candidates:
-                if m.fighter_a.id not in used and m.fighter_b.id not in used:
-                    selected.append(m)
-                    used.add(m.fighter_a.id)
-                    used.add(m.fighter_b.id)
-                if len(selected) >= fights_per_class:
-                    break
-            if selected:
-                fight_card[wc] = selected
-    else:
-        from models.matchmaker import Matchmaker
-        try:
-            with Matchmaker(db) as mm:
-                fight_card = mm.predict_card(
-                    weight_classes=wcs,
-                    n_per_class=fights_per_class,
-                )
-        except RuntimeError as e:
-            console.print(f"[red]{e}[/red]")
-            raise typer.Exit(1)
-
-    print_fight_card(fight_card)
+    summary = run_backtest(db, test_date_from=test_from, k=k)
+    console.print("\n[bold]Backtest summary:[/bold]")
+    for key, val in summary.items():
+        console.print(f"  {key}: {val}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# stats
+# experiments — summary table + plots
+# ─────────────────────────────────────────────────────────────────────────────
+
+@app.command()
+def experiments():
+    """[bold]Generate experiment summary tables and plots.[/bold]"""
+    from models.experiment_summary import main as run_experiments
+    run_experiments()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# stats — DB record counts
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.command()
@@ -315,186 +259,28 @@ def stats():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# evaluate
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.command()
-def evaluate(verbose: bool = typer.Option(False, "--verbose", "-v")):
-    """
-    [bold]Evaluate the trained model on the full dataset.[/bold]
-
-    Prints MAE, RMSE, and R² metrics.
-    """
-    setup_logging("DEBUG" if verbose else "INFO")
-
-    from models.training import load_model, evaluate as eval_model
-    from dashboard import print_training_eval
-
-    db = Database()
-    try:
-        model = load_model()
-        metrics = eval_model(model, db)
-        print_training_eval(metrics)
-    except FileNotFoundError:
-        console.print("[red]No trained model found. Run: python main.py train[/red]")
-        raise typer.Exit(1)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# demo — synthetic data, no scraping, no model needed
-# ─────────────────────────────────────────────────────────────────────────────
-
-@app.command()
-def demo(
-    weight_class: str = typer.Option("Lightweight", "--weight-class", "-w"),
-    top: int          = typer.Option(10, "--top", "-n"),
-):
-    """
-    [bold]Run a demo with synthetic fighter data.[/bold]
-
-    Inserts a set of realistic fake fighters into the DB and runs the
-    heuristic matchmaker — no internet access or trained model needed.
-    Useful for testing the dashboard output format.
-    """
-    from dashboard import print_matchup_report, console as dash_console
-    from models.matchmaker import HeuristicMatchmaker
-
-    dash_console.print("\n[bold yellow]Running DEMO with synthetic data...[/bold yellow]\n")
-
-    db = Database()
-    _insert_demo_data(db, weight_class)
-
-    mm = HeuristicMatchmaker(db)
-    results = mm.predict_weight_class(weight_class, top_n=top, min_fights=0)
-    print_matchup_report(results, weight_class)
-
-
-def _insert_demo_data(db: Database, weight_class: str):
-    """
-    Insert a realistic set of synthetic fighters for demo purposes.
-    Covers a range of styles: strikers, grapplers, balanced fighters.
-    """
-    synthetic_fighters = [
-        # Strikers (low grapple_ratio, high sig_strikes_pm, high ko_rate)
-        dict(name="Demo: Apex Striker",   weight_class=weight_class, ranking=1,
-             wins_total=22, losses_total=2, ko_rate=0.72, sub_rate=0.05, dec_rate=0.23,
-             finish_rate=0.77, sig_strikes_pm=8.4, sig_strike_acc=0.52,
-             sig_strikes_abs_pm=3.1, sig_strike_def=0.62, td_avg=0.4, td_acc=0.30,
-             td_def=0.78, sub_avg=0.1, grapple_ratio=0.08, ctrl_time_avg=15.0,
-             height_cm=177.0, reach_cm=183.0, weight_lbs=155.0),
-
-        dict(name="Demo: Iron Chin",       weight_class=weight_class, ranking=3,
-             wins_total=19, losses_total=4, ko_rate=0.58, sub_rate=0.11, dec_rate=0.31,
-             finish_rate=0.69, sig_strikes_pm=7.1, sig_strike_acc=0.47,
-             sig_strikes_abs_pm=5.2, sig_strike_def=0.54, td_avg=0.6, td_acc=0.35,
-             td_def=0.65, sub_avg=0.3, grapple_ratio=0.12, ctrl_time_avg=20.0,
-             height_cm=175.0, reach_cm=178.0, weight_lbs=155.0),
-
-        dict(name="Demo: Vicious Volume",  weight_class=weight_class, ranking=5,
-             wins_total=17, losses_total=3, ko_rate=0.41, sub_rate=0.06, dec_rate=0.53,
-             finish_rate=0.47, sig_strikes_pm=9.8, sig_strike_acc=0.44,
-             sig_strikes_abs_pm=5.8, sig_strike_def=0.50, td_avg=0.3, td_acc=0.28,
-             td_def=0.72, sub_avg=0.1, grapple_ratio=0.05, ctrl_time_avg=10.0,
-             height_cm=180.0, reach_cm=185.0, weight_lbs=155.0),
-
-        # Grapplers (high grapple_ratio, high td_avg, high sub_rate)
-        dict(name="Demo: Ground Tyrant",   weight_class=weight_class, ranking=2,
-             wins_total=24, losses_total=1, ko_rate=0.13, sub_rate=0.62, dec_rate=0.25,
-             finish_rate=0.75, sig_strikes_pm=2.8, sig_strike_acc=0.49,
-             sig_strikes_abs_pm=2.0, sig_strike_def=0.71, td_avg=6.1, td_acc=0.58,
-             td_def=0.87, sub_avg=3.4, grapple_ratio=0.72, ctrl_time_avg=210.0,
-             height_cm=176.0, reach_cm=177.0, weight_lbs=155.0),
-
-        dict(name="Demo: The Submission",  weight_class=weight_class, ranking=4,
-             wins_total=21, losses_total=3, ko_rate=0.10, sub_rate=0.71, dec_rate=0.19,
-             finish_rate=0.81, sig_strikes_pm=3.2, sig_strike_acc=0.46,
-             sig_strikes_abs_pm=2.5, sig_strike_def=0.68, td_avg=5.2, td_acc=0.51,
-             td_def=0.80, sub_avg=4.1, grapple_ratio=0.68, ctrl_time_avg=190.0,
-             height_cm=178.0, reach_cm=179.0, weight_lbs=155.0),
-
-        # Balanced / all-rounders
-        dict(name="Demo: Complete Package", weight_class=weight_class, ranking=6,
-             wins_total=15, losses_total=3, ko_rate=0.40, sub_rate=0.33, dec_rate=0.27,
-             finish_rate=0.73, sig_strikes_pm=5.5, sig_strike_acc=0.50,
-             sig_strikes_abs_pm=3.4, sig_strike_def=0.60, td_avg=2.8, td_acc=0.45,
-             td_def=0.74, sub_avg=1.2, grapple_ratio=0.35, ctrl_time_avg=80.0,
-             height_cm=177.0, reach_cm=181.0, weight_lbs=155.0),
-
-        dict(name="Demo: War Machine",     weight_class=weight_class, ranking=7,
-             wins_total=18, losses_total=5, ko_rate=0.44, sub_rate=0.22, dec_rate=0.34,
-             finish_rate=0.66, sig_strikes_pm=6.2, sig_strike_acc=0.46,
-             sig_strikes_abs_pm=4.5, sig_strike_def=0.55, td_avg=2.1, td_acc=0.42,
-             td_def=0.68, sub_avg=0.8, grapple_ratio=0.25, ctrl_time_avg=60.0,
-             height_cm=176.0, reach_cm=180.0, weight_lbs=155.0),
-
-        dict(name="Demo: Chaos Factor",    weight_class=weight_class, ranking=9,
-             wins_total=14, losses_total=4, ko_rate=0.64, sub_rate=0.14, dec_rate=0.22,
-             finish_rate=0.78, sig_strikes_pm=7.4, sig_strike_acc=0.43,
-             sig_strikes_abs_pm=5.6, sig_strike_def=0.48, td_avg=1.2, td_acc=0.38,
-             td_def=0.59, sub_avg=0.4, grapple_ratio=0.13, ctrl_time_avg=25.0,
-             height_cm=174.0, reach_cm=176.0, weight_lbs=155.0),
-
-        dict(name="Demo: The Surgeon",     weight_class=weight_class, ranking=10,
-             wins_total=20, losses_total=2, ko_rate=0.35, sub_rate=0.10, dec_rate=0.55,
-             finish_rate=0.45, sig_strikes_pm=5.8, sig_strike_acc=0.57,
-             sig_strikes_abs_pm=2.8, sig_strike_def=0.67, td_avg=1.5, td_acc=0.48,
-             td_def=0.76, sub_avg=0.6, grapple_ratio=0.20, ctrl_time_avg=45.0,
-             height_cm=179.0, reach_cm=184.0, weight_lbs=155.0),
-
-        dict(name="Demo: Unranked Danger", weight_class=weight_class, ranking=None,
-             wins_total=12, losses_total=2, ko_rate=0.67, sub_rate=0.08, dec_rate=0.25,
-             finish_rate=0.75, sig_strikes_pm=6.9, sig_strike_acc=0.49,
-             sig_strikes_abs_pm=3.9, sig_strike_def=0.57, td_avg=0.9, td_acc=0.40,
-             td_def=0.70, sub_avg=0.2, grapple_ratio=0.11, ctrl_time_avg=22.0,
-             height_cm=178.0, reach_cm=182.0, weight_lbs=155.0),
-    ]
-
-    for f in synthetic_fighters:
-        db.upsert_fighter(f)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# seed-db — minimal SQLite for splits / PCA without scraping
+# seed-db — minimal SQLite for offline tests (no scraping)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.command("seed-db")
 def seed_db(
-    db: Optional[str] = typer.Option(
-        None,
-        "--db",
-        help="Database path (default: data/ufc_matchmaker.db)",
-    ),
+    db: Optional[str] = typer.Option(None, "--db", help="Database path (default: data/ufc_matchmaker.db)"),
 ):
-    """
-    [bold]Create a minimal database[/bold] with train/val/test fights so
-    [cyan]pca[/cyan] and modelling commands can run without [cyan]collect[/cyan].
-
-    Overwrites existing rows in that file — use a copy if you need to preserve data.
-    """
+    """[bold]Create a minimal database with train/val/test fights so PCA/modelling can run without scraping.[/bold]"""
     from data.seed_minimal_splits_db import seed
-
     path = seed(db_path=db)
     console.print(f"[green]Seeded minimal database:[/green] {path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# pca — dimensionality analysis (scaled 115-dim features)
+# pca — cumulative variance / PC1 loadings on scaled 115-dim training features
 # ─────────────────────────────────────────────────────────────────────────────
 
 @app.command()
 def pca(
-    db: Optional[str] = typer.Option(
-        None,
-        "--db",
-        help="Path to ufc_matchmaker.db (default: data/ufc_matchmaker.db)",
-    ),
+    db: Optional[str] = typer.Option(None, "--db", help="Path to ufc_matchmaker.db"),
 ):
-    """
-    [bold]PCA on training features[/bold] — cumulative variance and PC1 loadings.
-
-    Requires the canonical database used for modelling. Useful for assessing
-    redundancy across the 115 engineered dimensions.
-    """
+    """[bold]PCA on training features — cumulative variance and PC1 loadings.[/bold]"""
     from models.pca_analysis import format_pca_report, run_pca_from_db
 
     path = db or str(Path(__file__).resolve().parent / "data" / "ufc_matchmaker.db")
@@ -505,10 +291,6 @@ def pca(
         console.print(f"[red]{e}[/red]")
         raise typer.Exit(1)
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     app()

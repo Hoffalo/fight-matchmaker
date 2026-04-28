@@ -1,3 +1,5 @@
+# EXPERIMENTAL: PCA analysis. Results showed RFECV features outperformed PCA.
+# Kept for reference and presentation plots.
 """
 PCA dimensionality analysis for the matchup feature space (full scaled vector).
 

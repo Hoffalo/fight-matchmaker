@@ -1,3 +1,5 @@
+# LEGACY: Regression model predicting heuristic score. Replaced by nn_binary.py (binary classification).
+# Kept for reference only. Not used in the production pipeline.
 """
 models/fight_quality_nn.py
 PyTorch Neural Network for predicting Fight Quality Score.

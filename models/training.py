@@ -1,3 +1,5 @@
+# LEGACY: Training loop for regression model. Replaced by nn_binary.py training (run_twelve_feature_comparison).
+# Kept for reference only. Not used in the production pipeline.
 """
 models/training.py
 ═══════════════════════════════════════════════════════════════════════════════

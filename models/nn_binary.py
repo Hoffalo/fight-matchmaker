@@ -490,6 +490,13 @@ def run_twelve_feature_comparison(
     )
     print(f"\nSaved best NN → {out_path}")
 
+    # Persist the train-fitted scaler alongside the checkpoint so MatchmakerV2 can
+    # transform inference vectors with the same statistics. ``splits["scaler"]`` was
+    # fit on the same (subset) train matrix used above.
+    scaler_path = CHECKPOINT_DIR / "scaler_12feat.pkl"
+    joblib.dump(splits["scaler"], scaler_path)
+    print(f"Saved scaler → {scaler_path}")
+
     xgb_auc = _try_load_xgb_cv_auc()
     print_architecture_comparison(nn_val_auc=best_auc, nn_params=n_params, xgb_cv_auc=xgb_auc)
 
