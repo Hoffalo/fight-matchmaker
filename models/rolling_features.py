@@ -4,15 +4,16 @@ Leak-safe rolling / recent form features from fight_stats for the UFC matchmaker
 
 Training: only fights with event_date strictly BEFORE the target fight date are used.
 
-Inference: use ``get_inference_rolling_vector(..., before_date=None)`` to use all recorded
-history through the latest event in the DB (or strictly before ``before_date`` if set).
+Inference: ``rolling_vector_asof`` / ``get_inference_rolling_vector`` use the same
+``_load_stats_dataframe`` + ``_rows_from_slice`` path as training (not raw SQL history),
+so scaled matchmaker inputs match the distribution seen at train time.
 """
 from __future__ import annotations
 
 import logging
 import sqlite3
 import time
-from datetime import date, timezone
+from datetime import timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -369,11 +370,43 @@ def _load_stats_dataframe(db_path: str | Path) -> pd.DataFrame:
 
 
 def _rows_from_slice(g: pd.DataFrame, before_ts: pd.Timestamp) -> list[dict[str, Any]]:
-    past = g[g["event_date_parsed"] < before_ts]
+    ts = pd.Timestamp(before_ts)
+    if ts.tzinfo is not None:
+        ts = ts.tz_convert("UTC").tz_localize(None)
+    past = g[g["event_date_parsed"] < ts]
     if past.empty:
         return []
     past = past.sort_values("event_date_parsed", ascending=False)
     return past.head(30).to_dict("records")
+
+
+def rolling_vector_asof(
+    fighter_id: int,
+    grouped: dict[int, pd.DataFrame],
+    asof_ts: pd.Timestamp,
+    career: dict | None = None,
+) -> np.ndarray:
+    """
+    Rolling vector at ``asof_ts`` using the same slicing as training
+    (``build_rolling_lookup_from_db`` / cache CSV).
+    """
+    g = grouped.get(int(fighter_id))
+    if g is None or g.empty:
+        return _career_fallback_vec(career)
+    hist = _rows_from_slice(g, asof_ts)
+    if not hist:
+        return _career_fallback_vec(career)
+    ed_str = (
+        asof_ts.date().isoformat()
+        if hasattr(asof_ts, "date")
+        else str(asof_ts)[:10]
+    )
+    return compute_rolling_features(
+        hist,
+        int(fighter_id),
+        ed_str,
+        career_fallback=career,
+    )
 
 
 def build_rolling_lookup_from_db(
@@ -493,20 +526,20 @@ def get_inference_rolling_vector(
 ) -> np.ndarray:
     """
     Rolling vector as of ``before_date`` (exclusive history). If ``before_date`` is None,
-    use all fights in DB and measure recency vs **today** (matchmaking default).
+    use all fights strictly before **now** (UTC), same dataframe path as training.
     """
     db_path = Path(db_path)
-    with sqlite3.connect(str(db_path)) as conn:
-        if before_date:
-            hist = get_fighter_fight_history(fighter_id, conn, before_date=before_date)
-            asof = before_date
-        else:
-            hist = get_fighter_fight_history(fighter_id, conn, before_date=None)
-            asof = str(date.today())
-
-    if not hist:
+    df = _load_stats_dataframe(db_path)
+    if df.empty:
         return _career_fallback_vec(career)
-    return compute_rolling_features(hist, fighter_id, asof, career_fallback=career)
+    grouped = {k: v for k, v in df.groupby("fighter_id")}
+    if before_date:
+        asof_ts = _parse_event_date(before_date)
+        if asof_ts is None:
+            asof_ts = pd.Timestamp.now(tz=timezone.utc)
+    else:
+        asof_ts = pd.Timestamp.now(tz=timezone.utc)
+    return rolling_vector_asof(int(fighter_id), grouped, asof_ts, career)
 
 
 def attach_rolling_to_fighter_dicts(

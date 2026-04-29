@@ -1,0 +1,34 @@
+{
+  "npz": "/Users/rajinasrallah/Desktop/fight-matchmaker/outputs/test_predictions_four_models.npz",
+  "n_test": 206,
+  "feature_dim": 12,
+  "feature_names": [
+    "style_clash_score",
+    "is_five_rounder",
+    "f1_roll_recent_knockdowns_norm",
+    "f1_roll_performance_consistency",
+    "f1_roll_strike_trend_norm",
+    "f1_roll_damage_trend_norm",
+    "f2_roll_recent_knockdowns_norm",
+    "f2_roll_performance_consistency",
+    "f2_roll_strike_trend_norm",
+    "f2_roll_damage_trend_norm",
+    "variance_clash",
+    "recent_output_combined"
+  ],
+  "y_true": "is_bonus_fight, test split from get_canonical_splits (temporal)",
+  "random_forest_best_params": {
+    "n_estimators": 500,
+    "min_samples_split": 10,
+    "min_samples_leaf": 4,
+    "max_features": "sqrt",
+    "max_depth": 10
+  },
+  "random_forest_cv_auc_mean": 0.5821191982404275,
+  "models": {
+    "logreg": "LogisticRegression fit on scaled X_train; proba from scaled X_test",
+    "random_forest": "Tuned RF (30 RandomizedSearch \u00d7 TimeSeriesSplit-5) on scaled train",
+    "xgboost": "xgb_tuned_12feat.pkl \u2014 Pipeline(StandardScaler, XGB); proba from raw X_test",
+    "neural_network": "nn_12feat.pt \u2014 scaled X_test"
+  }
+}

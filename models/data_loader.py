@@ -85,6 +85,7 @@ def get_canonical_splits(
         scaler                 — fitted StandardScaler
         feature_names          — list of names (length = number of columns kept)
         event_ids_test         — int array mapping test rows to events
+        meta_test              — dict with fight_id / event_date per augmented test row
         raw_train              — raw train dict (for k-fold CV downstream)
         summary                — dict with dataset statistics
     """
@@ -228,6 +229,7 @@ def get_canonical_splits(
         "scaler": scaler,
         "feature_names": feature_names_out,
         "event_ids_test": event_ids_test,
+        "meta_test": meta_test,
         "raw_train": raw_train,
         "summary": summary,
     }

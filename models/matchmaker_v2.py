@@ -2,17 +2,17 @@
 models/matchmaker_v2.py
 The product: an entertainment-optimised matchmaking engine.
 
-Loads the trained 12-feature binary classifier (FightBonusNN) and its
-StandardScaler from ``models/checkpoints/`` and scores every possible fighter
-pairing in a division by P(bonus fight). The matchups with the highest scores
-are surfaced as the "most entertaining" recommendations.
+**Default backend** is the tuned **XGBoost** pipeline (``xgb_tuned_12feat.pkl``): raw
+12-D subset → ``Pipeline(StandardScaler, XGBClassifier)`` → P(bonus).
+
+Optional ``backend=\"nn\"`` loads ``FightBonusNN`` + ``scaler_12feat.pkl`` (legacy path;
+that small MLP often saturates sigmoid near 1.0 on high-action feature profiles).
 
 Inference pipeline per pairing:
     fighter_a stats + fighter_b stats
         → build_full_matchup_vector()      [115-dim]
-        → subset_full_feature_vector()      [12-dim, names from pipeline_config]
-        → scaler.transform()                [12-dim scaled]
-        → FightBonusNN.forward() → sigmoid  [P(bonus fight)]
+        → subset_full_feature_vector()      [12-dim raw]
+        → (XGB) pipeline.predict_proba(raw)  OR  (NN) scaler → sigmoid(logit)
 
 Both orderings (A,B) and (B,A) are scored and the probabilities averaged so
 the result is symmetric.
@@ -28,6 +28,7 @@ from typing import Any, Optional
 
 import joblib
 import numpy as np
+import pandas as pd
 import torch
 
 from models.feature_engineering import (
@@ -39,11 +40,12 @@ from models.feature_engineering import (
 )
 from models.nn_binary import FightBonusNN
 from models.pipeline_config import SELECTED_FEATURES
-from models.rolling_features import get_inference_rolling_vector
+from models.rolling_features import _load_stats_dataframe, rolling_vector_asof
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHECKPOINT = Path(__file__).parent / "checkpoints" / "nn_12feat.pt"
+DEFAULT_CHECKPOINT_NN = Path(__file__).parent / "checkpoints" / "nn_12feat.pt"
+DEFAULT_CHECKPOINT_XGB = Path(__file__).parent / "checkpoints" / "xgb_tuned_12feat.pkl"
 DEFAULT_SCALER = Path(__file__).parent / "checkpoints" / "scaler_12feat.pkl"
 DEFAULT_DB = Path(__file__).parent.parent / "data" / "ufc_matchmaker.db"
 
@@ -90,44 +92,66 @@ class MatchmakerV2:
     The matchmaker. Self-contained: loads model + scaler + DB on init.
 
     Usage:
-        mm = MatchmakerV2()
+        mm = MatchmakerV2()                      # default: XGB pipeline
         mm.rank_weight_class("Lightweight", top_n=10)
-        mm.build_card(total_fights=5)
+
+        mm_nn = MatchmakerV2(backend="nn", ...)  # legacy NN + global scaler
     """
 
     def __init__(
         self,
         db_path: str | Path = DEFAULT_DB,
-        checkpoint_path: str | Path = DEFAULT_CHECKPOINT,
-        scaler_path: str | Path = DEFAULT_SCALER,
+        backend: str = "xgb",
+        checkpoint_path: str | Path | None = None,
+        scaler_path: str | Path | None = None,
     ) -> None:
-        # ── Model ─────────────────────────────────────────────────────────
-        ckpt_path = Path(checkpoint_path)
-        if not ckpt_path.is_file():
-            raise FileNotFoundError(
-                f"Missing checkpoint: {ckpt_path}\n"
-                "Generate it with: python -m models.nn_binary "
-                "(or call run_twelve_feature_comparison() programmatically)."
-            )
-        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-        cfg = ckpt["config"]
-        self.model = FightBonusNN(
-            input_dim=cfg["input_dim"],
-            hidden_dims=tuple(cfg["hidden_dims"]),
-            dropout=cfg["dropout"],
-        )
-        self.model.load_state_dict(ckpt["model_state"])
-        self.model.eval()
-        self.input_dim = int(cfg["input_dim"])
+        self.backend = backend.strip().lower()
+        if self.backend not in ("xgb", "nn"):
+            raise ValueError("backend must be 'xgb' or 'nn'")
 
-        # ── Scaler ────────────────────────────────────────────────────────
-        sc_path = Path(scaler_path)
-        if not sc_path.is_file():
-            raise FileNotFoundError(
-                f"Missing scaler: {sc_path}\n"
-                "Generate it by retraining: python -m models.nn_binary"
+        self.xgb_pipeline = None
+        self.model = None
+        self.scaler = None
+        self.input_dim = 0
+
+        # ── Model ─────────────────────────────────────────────────────────
+        if self.backend == "xgb":
+            ckpt_path = Path(checkpoint_path or DEFAULT_CHECKPOINT_XGB)
+            if not ckpt_path.is_file():
+                raise FileNotFoundError(
+                    f"Missing XGB pipeline: {ckpt_path}\n"
+                    "Train with: python -m models.xgb_tuning",
+                )
+            self.xgb_pipeline = joblib.load(ckpt_path)
+            self.input_dim = int(
+                self.xgb_pipeline.named_steps["xgb"].n_features_in_,
             )
-        self.scaler = joblib.load(sc_path)
+        else:
+            ckpt_path = Path(checkpoint_path or DEFAULT_CHECKPOINT_NN)
+            if not ckpt_path.is_file():
+                raise FileNotFoundError(
+                    f"Missing checkpoint: {ckpt_path}\n"
+                    "Generate it with: python -m models.nn_binary "
+                    "(or call run_twelve_feature_comparison() programmatically)."
+                )
+            ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+            cfg = ckpt["config"]
+            self.model = FightBonusNN(
+                input_dim=cfg["input_dim"],
+                hidden_dims=tuple(cfg["hidden_dims"]),
+                dropout=cfg["dropout"],
+            )
+            self.model.load_state_dict(ckpt["model_state"])
+            self.model.eval()
+            self.input_dim = int(cfg["input_dim"])
+
+            sc_path = Path(scaler_path or DEFAULT_SCALER)
+            if not sc_path.is_file():
+                raise FileNotFoundError(
+                    f"Missing scaler: {sc_path}\n"
+                    "Generate it by retraining: python -m models.nn_binary"
+                )
+            self.scaler = joblib.load(sc_path)
 
         # ── DB ────────────────────────────────────────────────────────────
         self.db_path = Path(db_path)
@@ -140,7 +164,7 @@ class MatchmakerV2:
         if self._selected_features and len(self._selected_features) != self.input_dim:
             raise ValueError(
                 f"SELECTED_FEATURES has {len(self._selected_features)} names but "
-                f"checkpoint expects {self.input_dim}-dim input."
+                f"model expects {self.input_dim}-dim input."
             )
 
         self._preload()
@@ -153,13 +177,21 @@ class MatchmakerV2:
         for row in self.db.execute("SELECT * FROM fighters"):
             self.fighters[int(row["id"])] = dict(row)
 
-        # Cache rolling vectors. ``get_inference_rolling_vector`` queries the DB
-        # internally and falls back to career stats when history < 2 fights.
+        # Rolling vectors: same *_rows_from_slice* path as training (not per-fighter SQL),
+        # one dataframe load for all fighters.
         self.rolling_cache: dict[int, np.ndarray] = {}
+        df = _load_stats_dataframe(self.db_path)
+        grouped = (
+            {k: v for k, v in df.groupby("fighter_id")} if not df.empty else {}
+        )
+        asof_ts = pd.Timestamp.now(tz="UTC")
         for fid, career in self.fighters.items():
             try:
-                self.rolling_cache[fid] = get_inference_rolling_vector(
-                    fid, self.db_path, career=career,
+                self.rolling_cache[int(fid)] = rolling_vector_asof(
+                    int(fid),
+                    grouped,
+                    asof_ts,
+                    dict(career),
                 )
             except Exception as exc:
                 logger.debug("rolling vec failed for fighter %s: %s", fid, exc)
@@ -203,13 +235,13 @@ class MatchmakerV2:
 
     # ── Vector building ──────────────────────────────────────────────────
 
-    def _build_vector(
+    def _raw_subvector(
         self,
         fa_id: int,
         fb_id: int,
         is_five_rounder: bool = False,
     ) -> np.ndarray:
-        """Build a scaled (1, input_dim) feature vector for a matchup."""
+        """12-D raw feature vector (same scale as training before global StandardScaler)."""
         fa = dict(self.fighters[fa_id])
         fb = dict(self.fighters[fb_id])
         fa["_rolling_vec"] = self.rolling_cache.get(fa_id)
@@ -232,10 +264,27 @@ class MatchmakerV2:
         vec_n = subset_full_feature_vector(
             vec_115, self._selected_features, list(ALL_FEATURE_NAMES),
         )
-        return self.scaler.transform(np.asarray(vec_n, dtype=np.float32).reshape(1, -1))
+        return np.asarray(vec_n, dtype=np.float64).ravel()
 
-    def _predict_proba(self, vec_scaled: np.ndarray) -> float:
-        """Run the NN forward pass and squash to probability."""
+    def _build_vector(
+        self,
+        fa_id: int,
+        fb_id: int,
+        is_five_rounder: bool = False,
+    ) -> np.ndarray:
+        """Scaled (1, input_dim) for NN backend; raises if backend is XGB."""
+        if self.backend != "nn" or self.scaler is None:
+            raise RuntimeError(
+                "_build_vector (scaled) is only valid for backend='nn'. "
+                "Use _raw_subvector() for raw 12-D features.",
+            )
+        raw = self._raw_subvector(fa_id, fb_id, is_five_rounder)
+        return self.scaler.transform(raw.reshape(1, -1).astype(np.float32))
+
+    def _predict_proba_nn(self, vec_scaled: np.ndarray) -> float:
+        """NN forward + sigmoid (vec_scaled shape (1, n))."""
+        if self.model is None:
+            raise RuntimeError("NN not loaded")
         with torch.no_grad():
             logits = self.model(torch.from_numpy(vec_scaled.astype(np.float32)))
             return float(torch.sigmoid(logits).item())
@@ -249,8 +298,22 @@ class MatchmakerV2:
         is_five_rounder: bool = False,
     ) -> dict:
         """Score one matchup. Averages both orderings for symmetry."""
-        prob_ab = self._predict_proba(self._build_vector(fa_id, fb_id, is_five_rounder))
-        prob_ba = self._predict_proba(self._build_vector(fb_id, fa_id, is_five_rounder))
+        raw_ab = self._raw_subvector(fa_id, fb_id, is_five_rounder)
+        raw_ba = self._raw_subvector(fb_id, fa_id, is_five_rounder)
+        if self.backend == "xgb" and self.xgb_pipeline is not None:
+            prob_ab = float(
+                self.xgb_pipeline.predict_proba(raw_ab.reshape(1, -1))[0, 1],
+            )
+            prob_ba = float(
+                self.xgb_pipeline.predict_proba(raw_ba.reshape(1, -1))[0, 1],
+            )
+        else:
+            prob_ab = self._predict_proba_nn(
+                self.scaler.transform(raw_ab.reshape(1, -1).astype(np.float32)),
+            )
+            prob_ba = self._predict_proba_nn(
+                self.scaler.transform(raw_ba.reshape(1, -1).astype(np.float32)),
+            )
         prob = (prob_ab + prob_ba) / 2.0
 
         fa = self.fighters[fa_id]
