@@ -1,0 +1,32 @@
+[
+  {
+    "fighter_a": "Mason Jones",
+    "fighter_b": "Rongzhu",
+    "probability": 1.0,
+    "weight_class": "Lightweight"
+  },
+  {
+    "fighter_a": "Adam Fugitt",
+    "fighter_b": "Chidi Njokuani",
+    "probability": 1.0,
+    "weight_class": "Welterweight"
+  },
+  {
+    "fighter_a": "Michal Oleksiejczuk",
+    "fighter_b": "Sean Strickland",
+    "probability": 1.0,
+    "weight_class": "Middleweight"
+  },
+  {
+    "fighter_a": "Merab Dvalishvili",
+    "fighter_b": "Muin Gafurov",
+    "probability": 1.0,
+    "weight_class": "Bantamweight"
+  },
+  {
+    "fighter_a": "Jan Blachowicz",
+    "fighter_b": "Jiri Prochazka",
+    "probability": 1.0,
+    "weight_class": "Light Heavyweight"
+  }
+]

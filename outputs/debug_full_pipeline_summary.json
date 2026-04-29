@@ -1,0 +1,8 @@
+{
+  "infos": [
+    "INFO: Default MatchmakerV2 uses XGB pipeline on raw 12-D rows; backend='nn' uses scaler_12feat + FightBonusNN (separate from XGB's internal scaler).",
+    "MatchmakerV2 supports backend='nn' (FightBonusNN) and backend='xgb' (default pipeline)",
+    "Default checkpoint is xgb_tuned_12feat.pkl (production)"
+  ],
+  "bugs_found": []
+}

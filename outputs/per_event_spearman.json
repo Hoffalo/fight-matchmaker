@@ -1,0 +1,80 @@
+{
+  "mean_rho": 0.1389,
+  "top1_hit_rate": "4/8",
+  "top3_hit_rate": "4/8",
+  "n_events": 8,
+  "events": [
+    {
+      "event_id": 8,
+      "event_name": "UFC 324: Gaethje vs. Pimblett",
+      "event_date": "2026-01-24",
+      "n_fights": 11,
+      "n_bonuses": 3,
+      "spearman_rho": 0.2031,
+      "top1_hit": true
+    },
+    {
+      "event_id": 7,
+      "event_name": "UFC 325: Volkanovski vs. Lopes 2",
+      "event_date": "2026-01-31",
+      "n_fights": 13,
+      "n_bonuses": 3,
+      "spearman_rho": -0.0995,
+      "top1_hit": false
+    },
+    {
+      "event_id": 6,
+      "event_name": "UFC Fight Night: Bautista vs. Oliveira",
+      "event_date": "2026-02-07",
+      "n_fights": 13,
+      "n_bonuses": 3,
+      "spearman_rho": 0.0771,
+      "top1_hit": false
+    },
+    {
+      "event_id": 5,
+      "event_name": "UFC Fight Night: Strickland vs. Hernandez",
+      "event_date": "2026-02-21",
+      "n_fights": 14,
+      "n_bonuses": 4,
+      "spearman_rho": 0.0,
+      "top1_hit": true
+    },
+    {
+      "event_id": 4,
+      "event_name": "UFC Fight Night: Moreno vs. Kavanagh",
+      "event_date": "2026-02-28",
+      "n_fights": 13,
+      "n_bonuses": 3,
+      "spearman_rho": -0.2122,
+      "top1_hit": false
+    },
+    {
+      "event_id": 3,
+      "event_name": "UFC 326: Holloway vs. Oliveira 2",
+      "event_date": "2026-03-07",
+      "n_fights": 12,
+      "n_bonuses": 4,
+      "spearman_rho": 0.361,
+      "top1_hit": true
+    },
+    {
+      "event_id": 2,
+      "event_name": "UFC Fight Night: Emmett vs. Vallejos",
+      "event_date": "2026-03-14",
+      "n_fights": 14,
+      "n_bonuses": 3,
+      "spearman_rho": 0.6557,
+      "top1_hit": true
+    },
+    {
+      "event_id": 1,
+      "event_name": "UFC Fight Night: Evloev vs. Murphy",
+      "event_date": "2026-03-21",
+      "n_fights": 13,
+      "n_bonuses": 3,
+      "spearman_rho": 0.1258,
+      "top1_hit": false
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "n_test_augmented": 206,
+  "n_test_unique_fights": 103,
+  "base_rate": 0.2524271844660194,
+  "xgb_brier": 0.2365243471207568,
+  "outputs": [
+    "/Users/rajinasrallah/Desktop/fight-matchmaker/outputs/plots/calibration_final.png",
+    "/Users/rajinasrallah/Desktop/fight-matchmaker/outputs/plots/calibration_bootstrap.png",
+    "/Users/rajinasrallah/Desktop/fight-matchmaker/outputs/plots/calibration_simple_bars.png"
+  ],
+  "framing": "Reliability curves are high-variance with ~100\u2013200 test rows and ~5 bins; quantile binning equalizes counts but does not remove sampling noise. Prefer the 3-bin bar chart on the main slide; use bootstrap or appendix for honesty about uncertainty."
+}

@@ -1,0 +1,47 @@
+{
+  "Logistic Regression": {
+    "test_auc": 0.5552,
+    "test_f1": 0.4124,
+    "test_accuracy": 0.4466,
+    "test_precision": 0.2817,
+    "test_recall": 0.7692,
+    "spearman_rho": 0.0831,
+    "spearman_p": 0.2352
+  },
+  "Random Forest": {
+    "test_auc": 0.5772,
+    "test_f1": 0.4183,
+    "test_accuracy": 0.568,
+    "test_precision": 0.3168,
+    "test_recall": 0.6154,
+    "spearman_rho": 0.1161,
+    "spearman_p": 0.0964
+  },
+  "XGBoost (tuned)": {
+    "test_auc": 0.5949,
+    "test_f1": 0.411,
+    "test_accuracy": 0.5825,
+    "test_precision": 0.3191,
+    "test_recall": 0.5769,
+    "spearman_rho": 0.1473,
+    "spearman_p": 0.0347
+  },
+  "Neural Net (12\u219216\u21921)": {
+    "test_auc": 0.459,
+    "test_f1": 0.2245,
+    "test_accuracy": 0.6311,
+    "test_precision": 0.2391,
+    "test_recall": 0.2115,
+    "spearman_rho": -0.0616,
+    "spearman_p": 0.3788
+  },
+  "Baseline (majority)": {
+    "test_auc": 0.5,
+    "test_f1": 0.0,
+    "test_accuracy": 0.7476,
+    "test_precision": 0.0,
+    "test_recall": 0.0,
+    "spearman_rho": 0.0,
+    "spearman_p": 1.0
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "best_n_components": 10,
+  "best_logreg_cv_auc": 0.6000706013115753,
+  "variance_explained_full_train": 0.9231015744906301
+}
