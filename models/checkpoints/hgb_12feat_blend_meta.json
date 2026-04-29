@@ -1,0 +1,217 @@
+{
+  "checkpoint": "/Users/rajinasrallah/Desktop/fight-matchmaker/models/checkpoints/hgb_12feat_blend.pkl",
+  "default_blend_weight": 0.96,
+  "best_test_row": {
+    "w_xgb": 0.99,
+    "split": "test",
+    "auc": 0.628121878121878,
+    "n_unique_probs": 59
+  },
+  "note": "Blend p = w * XGB + (1-w) * HGB (probabilities on symmetric fight rows are blended the same way in matchmaker_v2).",
+  "blend_scan": [
+    {
+      "w_xgb": 1.0,
+      "split": "val",
+      "auc": 0.5581333333333334,
+      "n_unique_probs": 57
+    },
+    {
+      "w_xgb": 1.0,
+      "split": "test",
+      "auc": 0.6088911088911089,
+      "n_unique_probs": 38
+    },
+    {
+      "w_xgb": 0.99,
+      "split": "val",
+      "auc": 0.5597333333333333,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.99,
+      "split": "test",
+      "auc": 0.628121878121878,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.98,
+      "split": "val",
+      "auc": 0.5590222222222222,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.98,
+      "split": "test",
+      "auc": 0.624125874125874,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.97,
+      "split": "val",
+      "auc": 0.5583111111111111,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.97,
+      "split": "test",
+      "auc": 0.6236263736263736,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.96,
+      "split": "val",
+      "auc": 0.5563555555555556,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.96,
+      "split": "test",
+      "auc": 0.6231268731268731,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.95,
+      "split": "val",
+      "auc": 0.5559999999999999,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.95,
+      "split": "test",
+      "auc": 0.6221278721278722,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.94,
+      "split": "val",
+      "auc": 0.5540444444444445,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.94,
+      "split": "test",
+      "auc": 0.6211288711288712,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.93,
+      "split": "val",
+      "auc": 0.5544,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.93,
+      "split": "test",
+      "auc": 0.6206293706293706,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.92,
+      "split": "val",
+      "auc": 0.5547555555555556,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.92,
+      "split": "test",
+      "auc": 0.6171328671328672,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.91,
+      "split": "val",
+      "auc": 0.5538666666666666,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.91,
+      "split": "test",
+      "auc": 0.6141358641358642,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.9,
+      "split": "val",
+      "auc": 0.5535111111111111,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.9,
+      "split": "test",
+      "auc": 0.6131368631368631,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.89,
+      "split": "val",
+      "auc": 0.5533333333333332,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.89,
+      "split": "test",
+      "auc": 0.6131368631368632,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.88,
+      "split": "val",
+      "auc": 0.5540444444444445,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.88,
+      "split": "test",
+      "auc": 0.6146353646353646,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.87,
+      "split": "val",
+      "auc": 0.5533333333333333,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.87,
+      "split": "test",
+      "auc": 0.6121378621378621,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.86,
+      "split": "val",
+      "auc": 0.5536888888888889,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.86,
+      "split": "test",
+      "auc": 0.6101398601398601,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.85,
+      "split": "val",
+      "auc": 0.5510222222222222,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.85,
+      "split": "test",
+      "auc": 0.6086413586413586,
+      "n_unique_probs": 59
+    },
+    {
+      "w_xgb": 0.84,
+      "split": "val",
+      "auc": 0.5474666666666667,
+      "n_unique_probs": 86
+    },
+    {
+      "w_xgb": 0.84,
+      "split": "test",
+      "auc": 0.6071428571428572,
+      "n_unique_probs": 59
+    }
+  ]
+}
