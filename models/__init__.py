@@ -11,6 +11,18 @@ working without importing torch.
 """
 from __future__ import annotations
 
+import os
+
+# macOS / Conda: default thread caps before NumPy/XGBoost init to avoid OpenMP
+# clashes that manifest as ``segmentation fault`` (see matchmaker_v2 CLI).
+for _k in (
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+):
+    os.environ.setdefault(_k, "1")
+
 import importlib
 from typing import Any
 

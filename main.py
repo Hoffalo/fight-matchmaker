@@ -137,6 +137,12 @@ def dreamcard(
         None, "--divisions", "-d",
         help="Comma-separated list of weight classes (default: all eight men's divisions)",
     ),
+    max_per_division: int = typer.Option(
+        1,
+        "--max-per-division",
+        "-m",
+        help="Cap fights per weight class (0 = no cap; default 1 spreads the card across divisions).",
+    ),
 ):
     """[bold]Build a dream card — best fights across divisions, no fighter repeats.[/bold]"""
     wcs = (
@@ -144,7 +150,11 @@ def dreamcard(
     )
     from models.matchmaker_v2 import MatchmakerV2
     mm = MatchmakerV2()
-    mm.build_card(weight_classes=wcs, total_fights=fights)
+    mm.build_card(
+        weight_classes=wcs,
+        total_fights=fights,
+        max_per_weight_class=None if max_per_division <= 0 else max_per_division,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

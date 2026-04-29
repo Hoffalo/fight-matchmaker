@@ -2,17 +2,19 @@
 models/matchmaker_v2.py
 The product: an entertainment-optimised matchmaking engine.
 
-**Default backend** is the tuned **XGBoost** pipeline (``xgb_tuned_12feat.pkl``): raw
-12-D subset → ``Pipeline(StandardScaler, XGBClassifier)`` → P(bonus).
+**Default backend** is ``xgb_tuned_12feat.pkl`` blended with ``hgb_12feat_blend.pkl``:
+``P = w * P_xgb + (1-w) * P_hgb`` on symmetric raw 12-D inputs (default ``w=0.99``).
+Shallow XGB alone maps many pairs to identical probabilities; the HGB mix restores
+ranking granularity and improves held-out AUC. Set ``MATCHMAKER_XGB_BLEND=1`` for
+pure XGB, or run ``python -m models.fit_hgb_blend`` to build the HGB artifact.
 
-Optional ``backend=\"nn\"`` loads ``FightBonusNN`` + ``scaler_12feat.pkl`` (legacy path;
-that small MLP often saturates sigmoid near 1.0 on high-action feature profiles).
+Optional ``backend=\"nn\"`` loads ``FightBonusNN`` + ``scaler_12feat.pkl`` (legacy path).
 
 Inference pipeline per pairing:
     fighter_a stats + fighter_b stats
         → build_full_matchup_vector()      [115-dim]
         → subset_full_feature_vector()      [12-dim raw]
-        → (XGB) pipeline.predict_proba(raw)  OR  (NN) scaler → sigmoid(logit)
+        → (XGB+HGB blend) predict_proba(raw)  OR  (NN) scaler → sigmoid(logit)
 
 Both orderings (A,B) and (B,A) are scored and the probabilities averaged so
 the result is symmetric.
@@ -21,6 +23,8 @@ from __future__ import annotations
 
 import itertools
 import logging
+import os
+from collections import defaultdict
 import re
 import sqlite3
 from pathlib import Path
@@ -46,8 +50,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CHECKPOINT_NN = Path(__file__).parent / "checkpoints" / "nn_12feat.pt"
 DEFAULT_CHECKPOINT_XGB = Path(__file__).parent / "checkpoints" / "xgb_tuned_12feat.pkl"
+DEFAULT_HGB_BLEND = Path(__file__).parent / "checkpoints" / "hgb_12feat_blend.pkl"
 DEFAULT_SCALER = Path(__file__).parent / "checkpoints" / "scaler_12feat.pkl"
 DEFAULT_DB = Path(__file__).parent.parent / "data" / "ufc_matchmaker.db"
+# Weight on XGB in ``w * xgb + (1-w) * hgb``. Override with env MATCHMAKER_XGB_BLEND.
+DEFAULT_XGB_BLEND_WEIGHT = 0.99
 
 # UFC divisions in canonical form. Used both for filtering and for normalising
 # ``fights.weight_class`` strings ("Lightweight Bout", "UFC Lightweight Title
@@ -87,6 +94,22 @@ def _canonical_division(raw: str | None) -> str | None:
     return None
 
 
+def _matchup_sort_key(r: dict[str, Any]) -> tuple[float, float, int, int]:
+    """
+    Sort best-first. With the XGB+HGB blend, ``probability`` is usually unique
+    enough; ``tiebreak`` remains a last resort for exact float ties.
+    """
+    a_id = int(r["fighter_a_id"])
+    b_id = int(r["fighter_b_id"])
+    lo, hi = (a_id, b_id) if a_id <= b_id else (b_id, a_id)
+    return (
+        -float(r["probability"]),
+        -float(r.get("tiebreak", 0.0)),
+        -lo,
+        -hi,
+    )
+
+
 class MatchmakerV2:
     """
     The matchmaker. Self-contained: loads model + scaler + DB on init.
@@ -110,6 +133,8 @@ class MatchmakerV2:
             raise ValueError("backend must be 'xgb' or 'nn'")
 
         self.xgb_pipeline = None
+        self.hgb_blend_pipeline = None
+        self._xgb_blend_weight = 1.0
         self.model = None
         self.scaler = None
         self.input_dim = 0
@@ -126,6 +151,24 @@ class MatchmakerV2:
             self.input_dim = int(
                 self.xgb_pipeline.named_steps["xgb"].n_features_in_,
             )
+
+            blend_env = os.environ.get("MATCHMAKER_XGB_BLEND", "").strip()
+            self._xgb_blend_weight = (
+                float(blend_env) if blend_env else float(DEFAULT_XGB_BLEND_WEIGHT)
+            )
+            if not 0.0 <= self._xgb_blend_weight <= 1.0:
+                raise ValueError("MATCHMAKER_XGB_BLEND must be in [0, 1]")
+            if self._xgb_blend_weight < 1.0:
+                if DEFAULT_HGB_BLEND.is_file():
+                    self.hgb_blend_pipeline = joblib.load(DEFAULT_HGB_BLEND)
+                else:
+                    logger.warning(
+                        "MATCHMAKER_XGB_BLEND=%s but %s missing — run "
+                        "`python -m models.fit_hgb_blend`. Using pure XGB.",
+                        self._xgb_blend_weight,
+                        DEFAULT_HGB_BLEND,
+                    )
+                    self._xgb_blend_weight = 1.0
         else:
             ckpt_path = Path(checkpoint_path or DEFAULT_CHECKPOINT_NN)
             if not ckpt_path.is_file():
@@ -266,6 +309,24 @@ class MatchmakerV2:
         )
         return np.asarray(vec_n, dtype=np.float64).ravel()
 
+    def _tiebreak_score(
+        self,
+        fa_id: int,
+        fb_id: int,
+        is_five_rounder: bool = False,
+    ) -> float:
+        """
+        Symmetric secondary score when the classifier assigns the same probability
+        to many pairs (e.g. XGB depth-2 leaves). Uses mean L1 norm of the raw
+        model-input vectors for both corner orderings.
+        """
+        raw_ab = self._raw_subvector(fa_id, fb_id, is_five_rounder)
+        raw_ba = self._raw_subvector(fb_id, fa_id, is_five_rounder)
+        return (
+            float(np.linalg.norm(raw_ab, ord=1))
+            + float(np.linalg.norm(raw_ba, ord=1))
+        ) / 2.0
+
     def _build_vector(
         self,
         fa_id: int,
@@ -301,12 +362,29 @@ class MatchmakerV2:
         raw_ab = self._raw_subvector(fa_id, fb_id, is_five_rounder)
         raw_ba = self._raw_subvector(fb_id, fa_id, is_five_rounder)
         if self.backend == "xgb" and self.xgb_pipeline is not None:
-            prob_ab = float(
+            prob_xgb_ab = float(
                 self.xgb_pipeline.predict_proba(raw_ab.reshape(1, -1))[0, 1],
             )
-            prob_ba = float(
+            prob_xgb_ba = float(
                 self.xgb_pipeline.predict_proba(raw_ba.reshape(1, -1))[0, 1],
             )
+            prob_xgb = (prob_xgb_ab + prob_xgb_ba) / 2.0
+            if self.hgb_blend_pipeline is not None and self._xgb_blend_weight < 1.0:
+                w = float(self._xgb_blend_weight)
+                prob_hgb_ab = float(
+                    self.hgb_blend_pipeline.predict_proba(
+                        raw_ab.reshape(1, -1),
+                    )[0, 1],
+                )
+                prob_hgb_ba = float(
+                    self.hgb_blend_pipeline.predict_proba(
+                        raw_ba.reshape(1, -1),
+                    )[0, 1],
+                )
+                prob_hgb = (prob_hgb_ab + prob_hgb_ba) / 2.0
+                prob = w * prob_xgb + (1.0 - w) * prob_hgb
+            else:
+                prob = prob_xgb
         else:
             prob_ab = self._predict_proba_nn(
                 self.scaler.transform(raw_ab.reshape(1, -1).astype(np.float32)),
@@ -314,10 +392,19 @@ class MatchmakerV2:
             prob_ba = self._predict_proba_nn(
                 self.scaler.transform(raw_ba.reshape(1, -1).astype(np.float32)),
             )
-        prob = (prob_ab + prob_ba) / 2.0
+            prob = (prob_ab + prob_ba) / 2.0
+        tiebreak = self._tiebreak_score(fa_id, fb_id, is_five_rounder)
 
+        # Symmetric display: alphabetical by name so fighter_a isn't always the
+        # first row in combinations() (sorted-by-name list → same corner every time).
         fa = self.fighters[fa_id]
         fb = self.fighters[fb_id]
+        na = (fa.get("name") or "").strip().lower()
+        nb = (fb.get("name") or "").strip().lower()
+        if nb < na:
+            fa_id, fb_id = fb_id, fa_id
+            fa, fb = fb, fa
+
         stars = (
             5 if prob >= 0.65
             else 4 if prob >= 0.50
@@ -330,7 +417,8 @@ class MatchmakerV2:
             "fighter_b": fb["name"],
             "fighter_a_id": fa_id,
             "fighter_b_id": fb_id,
-            "probability": round(prob, 4),
+            "probability": float(prob),
+            "tiebreak": float(tiebreak),
             "stars": stars,
             "reasons": self._explain(fa_id, fb_id),
         }
@@ -410,8 +498,16 @@ class MatchmakerV2:
         weight_class: str,
         top_n: int = 10,
         is_five_rounder: bool = False,
+        *,
+        diverse: bool = True,
     ) -> list[dict]:
-        """Score every unique pairing in a division and return the top N."""
+        """
+        Score every unique pairing in a division and return the top N.
+
+        If ``diverse`` is True (default), greedily prefers matchups that do not
+        reuse a fighter already chosen, so the list is not ten variants of the
+        same person vs everyone else (common when one name sorts first and scores high).
+        """
         fighters = self._get_active_fighters(weight_class)
         pairs = list(itertools.combinations(fighters, 2))
 
@@ -423,22 +519,44 @@ class MatchmakerV2:
             except Exception as exc:
                 logger.debug("scoring %s vs %s failed: %s", fa.get("name"), fb.get("name"), exc)
 
-        results.sort(key=lambda r: r["probability"], reverse=True)
+        results.sort(key=_matchup_sort_key)
+
+        if diverse:
+            picked: list[dict] = []
+            used_ids: set[int] = set()
+            for r in results:
+                if r["fighter_a_id"] in used_ids or r["fighter_b_id"] in used_ids:
+                    continue
+                picked.append(r)
+                used_ids.add(r["fighter_a_id"])
+                used_ids.add(r["fighter_b_id"])
+                if len(picked) >= top_n:
+                    break
+            if len(picked) < top_n:
+                for r in results:
+                    if r in picked:
+                        continue
+                    picked.append(r)
+                    if len(picked) >= top_n:
+                        break
+            results_out = picked[:top_n]
+        else:
+            results_out = results[:top_n]
 
         print(f"\n{'=' * 75}")
-        print(f"  {weight_class.upper()} — Top {min(top_n, len(results))} Most Entertaining Matchups")
+        print(f"  {weight_class.upper()} — Top {min(top_n, len(results_out))} Most Entertaining Matchups")
         print(f"{'=' * 75}")
-        for i, r in enumerate(results[:top_n], 1):
+        for i, r in enumerate(results_out, 1):
             stars_str = "★" * r["stars"] + "☆" * (5 - r["stars"])
             print(f"\n  #{i}  {r['fighter_a']} vs {r['fighter_b']}")
-            print(f"       {stars_str}  ({r['probability']:.1%} entertainment probability)")
+            print(f"       {stars_str}  ({r['probability']:.2%} entertainment probability)")
             for reason in r["reasons"]:
                 print(f"       • {reason}")
         print(f"\n{'=' * 75}")
-        print(f"  Evaluated {len(results)} matchups from {len(fighters)} active fighters")
+        print(f"  Evaluated {len(pairs)} matchups from {len(fighters)} active fighters")
         print(f"{'=' * 75}")
 
-        return results[:top_n]
+        return results_out
 
     # ── Card builder ─────────────────────────────────────────────────────
 
@@ -446,8 +564,19 @@ class MatchmakerV2:
         self,
         weight_classes: Optional[list[str]] = None,
         total_fights: int = 5,
+        *,
+        max_per_weight_class: Optional[int] = 1,
     ) -> list[dict]:
-        """Best fights across divisions, no fighter repeats."""
+        """
+        Best fights across divisions. Each fighter appears at most once on the card
+        (greedy pass in descending score order).
+
+        ``max_per_weight_class`` limits how many bouts from the same division may
+        appear (default 1 so the card spreads across weight classes). Use ``None``
+        for no division cap (pure global top scores). If the cap prevents filling
+        ``total_fights``, a second pass relaxes the division limit while still
+        enforcing unique fighters.
+        """
         if weight_classes is None:
             weight_classes = [
                 "Lightweight", "Welterweight", "Middleweight",
@@ -455,7 +584,12 @@ class MatchmakerV2:
                 "Flyweight", "Heavyweight",
             ]
 
-        print(f"\nBuilding dream card across {len(weight_classes)} divisions...")
+        cap_note = (
+            f" (max {max_per_weight_class} fight(s) per division)"
+            if max_per_weight_class is not None
+            else " (no per-division cap)"
+        )
+        print(f"\nBuilding dream card across {len(weight_classes)} divisions{cap_note}...")
 
         all_matchups: list[dict] = []
         for wc in weight_classes:
@@ -468,17 +602,43 @@ class MatchmakerV2:
                 except Exception:
                     continue
 
-        all_matchups.sort(key=lambda r: r["probability"], reverse=True)
+        all_matchups.sort(key=_matchup_sort_key)
+
+        def pair_key(m: dict) -> frozenset[int]:
+            return frozenset((m["fighter_a_id"], m["fighter_b_id"]))
 
         card: list[dict] = []
         used: set[int] = set()
-        for m in all_matchups:
+        chosen: set[frozenset[int]] = set()
+        wc_counts: defaultdict[str, int] = defaultdict(int)
+
+        def consider(m: dict, *, enforce_div_cap: bool) -> bool:
+            k = pair_key(m)
+            if k in chosen:
+                return False
             if m["fighter_a_id"] in used or m["fighter_b_id"] in used:
-                continue
+                return False
+            wc = m["weight_class"]
+            if enforce_div_cap and max_per_weight_class is not None:
+                if wc_counts[wc] >= max_per_weight_class:
+                    return False
             card.append(m)
-            used.update((m["fighter_a_id"], m["fighter_b_id"]))
+            chosen.add(k)
+            used.add(m["fighter_a_id"])
+            used.add(m["fighter_b_id"])
+            wc_counts[wc] += 1
+            return True
+
+        for m in all_matchups:
             if len(card) >= total_fights:
                 break
+            consider(m, enforce_div_cap=True)
+
+        if max_per_weight_class is not None and len(card) < total_fights:
+            for m in all_matchups:
+                if len(card) >= total_fights:
+                    break
+                consider(m, enforce_div_cap=False)
 
         print(f"\n{'=' * 75}")
         print(f"  AI-GENERATED DREAM CARD — {len(card)} Most Entertaining Fights")
@@ -486,7 +646,7 @@ class MatchmakerV2:
         for i, r in enumerate(card, 1):
             stars_str = "★" * r["stars"] + "☆" * (5 - r["stars"])
             print(f"\n  Fight {i}: {r['fighter_a']} vs {r['fighter_b']}")
-            print(f"           {r['weight_class']} | {stars_str} | {r['probability']:.1%}")
+            print(f"           {r['weight_class']} | {stars_str} | {r['probability']:.2%}")
             print(f"           {r['reasons'][0]}")
         print(f"\n{'=' * 75}")
         return card
