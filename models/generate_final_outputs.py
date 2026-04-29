@@ -101,6 +101,17 @@ def part1_model_comparison(
         raise FileNotFoundError(f"Missing {xgb_path}")
     xgb_pipeline = joblib.load(xgb_path)
 
+    # The raw xgb_pipeline was trained with scale_pos_weight=2.71, which biases
+    # predict_proba upward. Use the post-hoc-calibrated wrapper for evaluation
+    # if available; SHAP still uses the raw pipeline below (TreeExplainer needs
+    # a tree model, not the CalibratedClassifierCV wrapper).
+    xgb_cal_path = CHECKPOINTS / "xgb_tuned_12feat_calibrated.pkl"
+    if xgb_cal_path.is_file():
+        xgb_for_eval = joblib.load(xgb_cal_path)
+        print(f"  Using calibrated XGB pipeline for evaluation: {xgb_cal_path.name}")
+    else:
+        xgb_for_eval = xgb_pipeline
+
     nn_path = CHECKPOINTS / "nn_12feat.pt"
     if not nn_path.is_file():
         raise FileNotFoundError(f"Missing {nn_path}")
@@ -134,7 +145,7 @@ def part1_model_comparison(
 
     eval_model("Logistic Regression", logreg.predict_proba(X_test_scaled)[:, 1])
     eval_model("Random Forest", rf.predict_proba(X_test_scaled)[:, 1])
-    eval_model("XGBoost (tuned)", xgb_pipeline.predict_proba(X_test_raw)[:, 1])
+    eval_model("XGBoost (tuned)", xgb_for_eval.predict_proba(X_test_raw)[:, 1])
     eval_model("Neural Net (12→16→1)", nn_predict_proba(nn_model, X_test_scaled))
 
     y_mean = float(np.mean(y_test))

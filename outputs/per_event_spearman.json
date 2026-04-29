@@ -1,7 +1,7 @@
 {
-  "mean_rho": 0.1389,
+  "mean_rho": 0.1919,
   "top1_hit_rate": "4/8",
-  "top3_hit_rate": "4/8",
+  "top3_hit_rate": "6/8",
   "n_events": 8,
   "events": [
     {
@@ -10,7 +10,7 @@
       "event_date": "2026-01-24",
       "n_fights": 11,
       "n_bonuses": 3,
-      "spearman_rho": 0.2031,
+      "spearman_rho": 0.2612,
       "top1_hit": true
     },
     {
@@ -19,7 +19,7 @@
       "event_date": "2026-01-31",
       "n_fights": 13,
       "n_bonuses": 3,
-      "spearman_rho": -0.0995,
+      "spearman_rho": -0.199,
       "top1_hit": false
     },
     {
@@ -28,7 +28,7 @@
       "event_date": "2026-02-07",
       "n_fights": 13,
       "n_bonuses": 3,
-      "spearman_rho": 0.0771,
+      "spearman_rho": 0.1283,
       "top1_hit": false
     },
     {
@@ -46,7 +46,7 @@
       "event_date": "2026-02-28",
       "n_fights": 13,
       "n_bonuses": 3,
-      "spearman_rho": -0.2122,
+      "spearman_rho": -0.0498,
       "top1_hit": false
     },
     {
@@ -55,7 +55,7 @@
       "event_date": "2026-03-07",
       "n_fights": 12,
       "n_bonuses": 4,
-      "spearman_rho": 0.361,
+      "spearman_rho": 0.591,
       "top1_hit": true
     },
     {
@@ -64,7 +64,7 @@
       "event_date": "2026-03-14",
       "n_fights": 14,
       "n_bonuses": 3,
-      "spearman_rho": 0.6557,
+      "spearman_rho": 0.6296,
       "top1_hit": true
     },
     {
@@ -73,7 +73,7 @@
       "event_date": "2026-03-21",
       "n_fights": 13,
       "n_bonuses": 3,
-      "spearman_rho": 0.1258,
+      "spearman_rho": 0.1737,
       "top1_hit": false
     }
   ]

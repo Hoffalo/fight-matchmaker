@@ -7,6 +7,23 @@ Training: only fights with event_date strictly BEFORE the target fight date are 
 Inference: ``rolling_vector_asof`` / ``get_inference_rolling_vector`` use the same
 ``_load_stats_dataframe`` + ``_rows_from_slice`` path as training (not raw SQL history),
 so scaled matchmaker inputs match the distribution seen at train time.
+
+KNOWN ISSUE — train/test distribution mismatch (verified 2026-04-29):
+The DB only contains events from 2025-01-18 onward. As a result, the *training*
+era (pre-2025-09) has 98.8% of fighter-corners hitting the < 2-prior-fights path
+and falling back to ``_career_fallback_vec``, where features like
+``recent_knockdowns_norm`` get the hardcoded constant 0.2. The *test* era
+(2026-01+) has only 36% cold-start — most fighters have 2–4 prior fights, giving
+actual rolling values (often 0.0 because they had no KOs in their few priors).
+Per-feature std on the standard-scaled test set runs 3.4× to 10× the train std.
+Consequence: XGB trained on these effectively-constant train rolling features
+can't generalize to test, so ``shap_bar_xgb.png`` shows the f1/f2_roll_*
+features at zero importance.
+
+The cure is **more historical data**, not a code change here. Scrape pre-2025
+events (UFCStats has fights back to ~1993) so train fighters have rolling
+history. ``report_history_depth()`` below makes it easy to verify the fix
+landed once the scrape extends the date range.
 """
 from __future__ import annotations
 
@@ -540,6 +557,62 @@ def get_inference_rolling_vector(
     else:
         asof_ts = pd.Timestamp.now(tz=timezone.utc)
     return rolling_vector_asof(int(fighter_id), grouped, asof_ts, career)
+
+
+def report_history_depth(
+    db_path: str | Path,
+    train_cutoff: str = "2025-09-01",
+    val_cutoff: str = "2026-01-01",
+) -> pd.DataFrame:
+    """
+    Diagnostic: per-era stats on how much prior fight history is available
+    for each (fight, fighter) corner. A row counts as "cold-start" if the
+    fighter had < 2 fights strictly before this fight's event_date — these
+    corners trigger ``_career_fallback_vec`` and lose all rolling signal.
+
+    Use this after backfilling historical events to verify the train/test
+    cold-start gap has closed. Healthy state: cold_start_rate roughly
+    similar across train/val/test.
+
+    Run:  python -c "from models.rolling_features import report_history_depth; \\
+                     print(report_history_depth('data/ufc_matchmaker.db'))"
+    """
+    q = """
+    SELECT
+      CASE
+        WHEN e.date < ? THEN 'train'
+        WHEN e.date < ? THEN 'val'
+        ELSE 'test'
+      END AS era,
+      AVG(prior_count) AS mean_n_prior,
+      SUM(CASE WHEN prior_count < 2 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS cold_start_rate,
+      SUM(CASE WHEN prior_count >= 2 AND knockdown_sum = 0 THEN 1 ELSE 0 END) * 1.0 / COUNT(*) AS warm_zero_kd_rate,
+      COUNT(*) AS n_corners
+    FROM (
+      SELECT
+        e1.date AS this_date,
+        fc.fid,
+        (SELECT COUNT(*) FROM fight_stats fs2
+         JOIN fights f2 ON f2.id = fs2.fight_id
+         JOIN events e2 ON e2.id = f2.event_id
+         WHERE fs2.fighter_id = fc.fid AND e2.date < e1.date
+         ORDER BY e2.date DESC LIMIT 5) AS prior_count,
+        (SELECT COALESCE(SUM(fs3.knockdowns), 0) FROM fight_stats fs3
+         JOIN fights f3 ON f3.id = fs3.fight_id
+         JOIN events e3 ON e3.id = f3.event_id
+         WHERE fs3.fighter_id = fc.fid AND e3.date < e1.date
+         ORDER BY e3.date DESC LIMIT 5) AS knockdown_sum
+      FROM fights f1
+      JOIN events e1 ON e1.id = f1.event_id
+      JOIN (SELECT fighter1_id AS fid, id AS fight_id FROM fights
+            UNION ALL SELECT fighter2_id, id FROM fights) fc ON fc.fight_id = f1.id
+    )
+    JOIN events e ON e.date = this_date
+    GROUP BY era
+    ORDER BY CASE era WHEN 'train' THEN 1 WHEN 'val' THEN 2 ELSE 3 END
+    """
+    with sqlite3.connect(str(db_path)) as con:
+        return pd.read_sql_query(q, con, params=(train_cutoff, val_cutoff))
 
 
 def attach_rolling_to_fighter_dicts(

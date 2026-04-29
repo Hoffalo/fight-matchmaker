@@ -18,7 +18,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-# RFECV optimal n=12 (115-dim feature_selection run). Set to None to use all 115 features.
+# RFECV optimal n=12 on the FULL 115-dim space (LogReg, TimeSeriesSplit-5).
+# Retained for reference — DO NOT use for new training. 8 of these 12 are
+# rolling-derived and have train_std ≈ 1 / test_std ≈ 6 (cold-start gap), so
+# the trained model can't generalize and SHAP shows them at zero.
 RFECV_OPTIMAL_115: tuple[str, ...] = (
     "style_clash_score",
     "is_five_rounder",
@@ -32,6 +35,19 @@ RFECV_OPTIMAL_115: tuple[str, ...] = (
     "f2_roll_damage_trend_norm",
     "variance_clash",
     "recent_output_combined",
+)
+
+# Distribution-stable RFECV pick: ran feature_selection_clean.py which dropped
+# the 38 features with test_std/train_std > 1.5 (rolling + rolling-derived) and
+# re-ran RFECV on the surviving 77. CV AUC 0.5922 (vs 0.5832 on the tainted
+# 12). Added f1_grapple_ratio for matchmaker symmetry — RFECV picked only the
+# f2 side because they're identically distributed after augmentation.
+RFECV_OPTIMAL_CLEAN: tuple[str, ...] = (
+    "f1_grapple_ratio",
+    "f2_grapple_ratio",
+    "style_clash_score",
+    "is_title_fight",
+    "is_five_rounder",
 )
 
 SELECTED_FEATURES: Optional[list[str]] = list(RFECV_OPTIMAL_115)

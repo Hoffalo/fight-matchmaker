@@ -1,0 +1,10 @@
+{
+  "best_cv_auc": 0.5706330838876571,
+  "train_auc": 0.6049517284335098,
+  "train_cv_gap": 0.03431864454585265,
+  "val_auc": 0.5695111111111111,
+  "test_auc_peek": 0.5656843156843157,
+  "n_iter": 200,
+  "scaler": "QuantileTransformer(output_distribution='normal')",
+  "scale_pos_weight": 1.0
+}

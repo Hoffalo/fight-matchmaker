@@ -1,28 +1,8 @@
 [
   {
-    "fighter_a": "Mason Jones",
-    "fighter_b": "Rongzhu",
-    "probability": 1.0,
-    "stars": 5,
-    "reasons": [
-      "Both fighters produce high-volume action",
-      "Recent fights suggest willingness to trade"
-    ]
-  },
-  {
-    "fighter_a": "Bolaji Oki",
-    "fighter_b": "Chris Padilla",
-    "probability": 0.9999,
-    "stars": 5,
-    "reasons": [
-      "Both fighters produce high-volume action",
-      "Recent fights suggest willingness to trade"
-    ]
-  },
-  {
     "fighter_a": "Chris Padilla",
     "fighter_b": "Mason Jones",
-    "probability": 0.9999,
+    "probability": 0.9998,
     "stars": 5,
     "reasons": [
       "Both fighters produce high-volume action"
@@ -31,7 +11,7 @@
   {
     "fighter_a": "Chris Padilla",
     "fighter_b": "Rongzhu",
-    "probability": 0.9999,
+    "probability": 0.9998,
     "stars": 5,
     "reasons": [
       "Both fighters produce high-volume action",
@@ -41,7 +21,27 @@
   {
     "fighter_a": "Chris Padilla",
     "fighter_b": "Terrance McKinney",
-    "probability": 0.9999,
+    "probability": 0.9998,
+    "stars": 5,
+    "reasons": [
+      "Both fighters produce high-volume action",
+      "Recent fights suggest willingness to trade"
+    ]
+  },
+  {
+    "fighter_a": "Mason Jones",
+    "fighter_b": "Rongzhu",
+    "probability": 0.9998,
+    "stars": 5,
+    "reasons": [
+      "Both fighters produce high-volume action",
+      "Recent fights suggest willingness to trade"
+    ]
+  },
+  {
+    "fighter_a": "Bolaji Oki",
+    "fighter_b": "Chris Padilla",
+    "probability": 0.9997,
     "stars": 5,
     "reasons": [
       "Both fighters produce high-volume action",
@@ -51,7 +51,7 @@
   {
     "fighter_a": "Chris Padilla",
     "fighter_b": "MarQuel Mederos",
-    "probability": 0.9998,
+    "probability": 0.9996,
     "stars": 5,
     "reasons": [
       "MarQuel Mederos has knockout power on display recently",
@@ -60,26 +60,18 @@
   },
   {
     "fighter_a": "Chris Padilla",
-    "fighter_b": "Viacheslav Borshchev",
-    "probability": 0.9998,
+    "fighter_b": "Rafa Garcia",
+    "probability": 0.9995,
     "stars": 5,
     "reasons": [
-      "Both fighters produce high-volume action"
-    ]
-  },
-  {
-    "fighter_a": "Mason Jones",
-    "fighter_b": "Viacheslav Borshchev",
-    "probability": 0.9998,
-    "stars": 5,
-    "reasons": [
+      "Rafa Garcia has knockout power on display recently",
       "Both fighters produce high-volume action"
     ]
   },
   {
     "fighter_a": "Mason Jones",
     "fighter_b": "Nazim Sadykhov",
-    "probability": 0.9997,
+    "probability": 0.9995,
     "stars": 5,
     "reasons": [
       "Nazim Sadykhov has knockout power on display recently",
@@ -89,11 +81,19 @@
   },
   {
     "fighter_a": "Chris Padilla",
-    "fighter_b": "Rafa Garcia",
-    "probability": 0.9996,
+    "fighter_b": "Viacheslav Borshchev",
+    "probability": 0.9994,
     "stars": 5,
     "reasons": [
-      "Rafa Garcia has knockout power on display recently",
+      "Both fighters produce high-volume action"
+    ]
+  },
+  {
+    "fighter_a": "Mason Jones",
+    "fighter_b": "Viacheslav Borshchev",
+    "probability": 0.9994,
+    "stars": 5,
+    "reasons": [
       "Both fighters produce high-volume action"
     ]
   }

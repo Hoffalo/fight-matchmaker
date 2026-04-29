@@ -1,0 +1,17 @@
+{
+  "best_cv_auc": 0.5713310110897162,
+  "train_auc": 0.6149063487120168,
+  "train_cv_gap": 0.04357533762230059,
+  "val_auc": 0.5632444444444444,
+  "test_auc_peek": 0.5408341658341658,
+  "n_iter": 200,
+  "n_features": 5,
+  "feature_names": [
+    "f1_grapple_ratio",
+    "f2_grapple_ratio",
+    "style_clash_score",
+    "is_title_fight",
+    "is_five_rounder"
+  ],
+  "scale_pos_weight": 1.0
+}
